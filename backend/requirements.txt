@@ -1,0 +1,10 @@
+fastapi
+uvicorn
+supabase
+anthropic
+python-jobspy
+python-docx
+markdownify
+python-multipart
+python-dotenv
+httpx
