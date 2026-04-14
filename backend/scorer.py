@@ -1,64 +1,72 @@
-import os
 import json
-import time
-import anthropic
-from dotenv import load_dotenv
+import requests
 import db
 
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
+OLLAMA_BASE = "http://localhost:11434"
+SCORING_MODEL = "gemma4:e4b"
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
-
-SCORING_PROMPT = """\
-You are an expert tech recruiter evaluating a student candidate's fit for a role.
-Be ruthlessly honest — do not inflate scores. This candidate is a Year 1 university student
-competing against more experienced candidates. A score of 7+ means genuinely strong fit.
+SCORING_PROMPT = """You are a ruthlessly honest tech recruiter evaluating a student candidate.
+This is a Year 1 university student competing against candidates with more experience.
+Do NOT inflate scores. A score of 7+ means genuinely strong fit.
 
 CANDIDATE RESUME:
-{master_resume_text}
+{master_resume}
 
 JOB DESCRIPTION:
 {jd_text}
 
-Respond ONLY in valid JSON with no preamble or markdown fences:
-
+Respond in JSON only:
 {{
-  "fit_score": <integer 1-10>,
-  "matched_skills": [<skills from resume matching JD requirements>],
-  "gaps": [<JD requirements absent or weak in resume>],
-  "recommendation": "<Apply | Maybe | Skip>",
-  "reasoning": "<2-3 sentence honest summary of fit>"
+  "fit_score": <1-10>,
+  "matched_skills": ["skill1", "skill2"],
+  "gaps": ["gap1", "gap2"],
+  "recommendation": "Apply|Maybe|Skip",
+  "reasoning": "2-3 honest sentences"
 }}
 
-Scoring guide:
-- 8-10: Strong fit, most requirements met, apply immediately
-- 5-7: Partial fit, worth reviewing, 1-2 key gaps
-- 1-4: Weak fit, significant gaps, skip unless target company
+Scoring:
+- 8-10: Strong fit, apply immediately
+- 5-7: Partial fit, 1-2 gaps, worth reviewing
+- 1-4: Weak fit, skip unless dream company
 
-Target: Tech / Product / AI roles in Singapore.\
-"""
+Target: Tech / Product / AI roles in Singapore."""
+
+
+def ollama_chat(model: str, prompt: str, expect_json: bool = True) -> str:
+    payload: dict = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.1,
+            "num_ctx": 8192,   # enough for prompt + full JSON output
+            "num_predict": 1024,
+        },
+    }
+    if expect_json:
+        payload["format"] = "json"
+    resp = requests.post(f"{OLLAMA_BASE}/api/generate", json=payload, timeout=300)
+    resp.raise_for_status()
+    return resp.json()["response"]
 
 
 def score_job(jd_text: str, master_resume: str) -> dict | None:
     if len(jd_text.strip()) < 100:
         return None  # JD too short to score reliably
 
+    prompt = SCORING_PROMPT.format(
+        master_resume=master_resume[:2000],  # cap resume; JD is the scoring signal
+        jd_text=jd_text[:3000],
+    )
+
+    raw = ""
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": SCORING_PROMPT.format(
-                master_resume_text=master_resume,
-                jd_text=jd_text,
-            )}],
-        )
-        raw = message.content[0].text.strip()
-        cleaned = raw.removeprefix("```json").removesuffix("```").strip()
-        data = json.loads(cleaned)
+        raw = ollama_chat(SCORING_MODEL, prompt, expect_json=True)
+        data = json.loads(raw)
         assert all(k in data for k in ["fit_score", "matched_skills", "gaps", "recommendation", "reasoning"])
         return data
     except Exception as e:
-        print(f"Scoring failed: {e}")
+        print(f"Scoring failed: {e}\nRaw: {raw[:200]}")
         return None
 
 
@@ -86,7 +94,5 @@ def score_all_unscored(master_resume: str, jobs: list[dict]) -> dict:
             })
             db.mark_job_scored(job_id)
             success += 1
-
-        time.sleep(1)  # Claude rate limit buffer
 
     return {"scored": success, "failed": failed}

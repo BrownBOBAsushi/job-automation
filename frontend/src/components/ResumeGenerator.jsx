@@ -74,10 +74,16 @@ export default function ResumeGenerator({ jobId }) {
   if (status === 'done' && output) {
     return (
       <div className="space-y-2">
-        <a href={`/api/resume/download/${jobId}`} target="_blank" rel="noopener noreferrer"
-          className="inline-block px-3 py-1.5 text-xs bg-green-700 hover:bg-green-600 text-white rounded-lg transition">
-          Download PDF
-        </a>
+        <div className="flex items-center gap-2">
+          <a href={`/api/resume/download/${jobId}`} target="_blank" rel="noopener noreferrer"
+            className="inline-block px-3 py-1.5 text-xs bg-green-700 hover:bg-green-600 text-white rounded-lg transition">
+            Download PDF
+          </a>
+          <button onClick={generate}
+            className="px-3 py-1.5 text-xs bg-gray-700 hover:bg-gray-600 text-gray-300 rounded-lg transition">
+            Regenerate
+          </button>
+        </div>
         <div className="flex gap-3 text-xs text-gray-400">
           <span>Match: <strong className="text-gray-200">{output.match_score}%</strong></span>
           {output.ats_flags?.length > 0 && (

@@ -1,25 +1,43 @@
+import json
 import os
 import threading
+from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 
-from fastapi import FastAPI, UploadFile, File, HTTPException, BackgroundTasks
+import requests
+from fastapi import FastAPI, File, HTTPException, UploadFile
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 
-from dotenv import load_dotenv
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
-
 import db
-from resume_converter import save_master_resume, load_master_resume
-from scorer import score_all_unscored
-from scraper import run_scrape
+from resume_converter import load_master_resume, save_master_resume
 from resume_tailor import generate_resume
+from scraper import DEFAULT_KEYWORDS, run_scrape
+from scorer import score_all_unscored
+
+OLLAMA_BASE = "http://localhost:11434"
+
+# ── Keywords persistence ───────────────────────────────────────────────────────
+
+_KEYWORDS_PATH = os.path.join(os.path.dirname(__file__), "keywords.json")
+
+
+def _load_keywords() -> list[str]:
+    if os.path.exists(_KEYWORDS_PATH):
+        with open(_KEYWORDS_PATH, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return list(DEFAULT_KEYWORDS)
+
+
+def _save_keywords(keywords: list[str]) -> None:
+    with open(_KEYWORDS_PATH, "w", encoding="utf-8") as f:
+        json.dump(keywords, f, ensure_ascii=False, indent=2)
 
 
 # ── Pipeline state ─────────────────────────────────────────────────────────────
 
-class _State:
+class _PipelineState:
     def __init__(self):
         self.status = "idle"
         self.last_run: str | None = None
@@ -32,10 +50,14 @@ class _State:
 
     def snapshot(self) -> dict:
         with self._lock:
-            return {"status": self.status, "last_run": self.last_run, "last_result": self.last_result}
+            return {
+                "status": self.status,
+                "last_run": self.last_run,
+                "last_result": self.last_result,
+            }
 
 
-pipeline = _State()
+pipeline = _PipelineState()
 resume_status: dict[str, str] = {}  # job_id → pending|generating|done|failed
 
 
@@ -72,9 +94,22 @@ def _run_resume(job_id: str, jd_text: str, job_title: str, company: str):
         resume_status[job_id] = "failed"
 
 
-# ── App ────────────────────────────────────────────────────────────────────────
+# ── App startup ────────────────────────────────────────────────────────────────
 
-app = FastAPI(title="Internship Tracker API")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    db.init_db()
+    try:
+        resp = requests.get(f"{OLLAMA_BASE}/api/tags", timeout=5)
+        resp.raise_for_status()
+        print("Ollama reachable — startup OK")
+    except Exception:
+        print("WARNING: Ollama not reachable at http://localhost:11434 — "
+              "scoring and resume generation will fail until Ollama is started")
+    yield
+
+
+app = FastAPI(title="Internship Tracker API", lifespan=lifespan)
 
 app.add_middleware(
     CORSMiddleware,
@@ -96,7 +131,8 @@ def trigger_pipeline(body: PipelineRunBody = PipelineRunBody()):
     state = pipeline.snapshot()
     if state["status"] in ("scraping", "scoring"):
         raise HTTPException(status_code=409, detail="Pipeline already running")
-    t = threading.Thread(target=_run_pipeline, args=(body.keywords,), daemon=True)
+    keywords = body.keywords if body.keywords else _load_keywords()
+    t = threading.Thread(target=_run_pipeline, args=(keywords,), daemon=True)
     t.start()
     return {"started": True}
 
@@ -115,8 +151,16 @@ def list_jobs(
     arrangement: str | None = None,
     job_type: str | None = None,
     search: str | None = None,
+    recommendation: str | None = None,
 ):
-    return db.get_jobs(min_score=min_score, platform=platform, arrangement=arrangement, job_type=job_type, search=search)
+    return db.get_jobs(
+        min_score=min_score,
+        platform=platform,
+        arrangement=arrangement,
+        job_type=job_type,
+        search=search,
+        recommendation=recommendation,
+    )
 
 
 @app.get("/jobs/{job_id}")
@@ -129,15 +173,15 @@ def get_job(job_id: str):
 
 class StatusUpdate(BaseModel):
     status: str
-    notes: str | None = None
 
 
 @app.patch("/jobs/{job_id}/status")
 def update_status(job_id: str, body: StatusUpdate):
-    valid = {"saved", "applied", "interviewing", "offer"}
+    valid = {"new", "saved", "applied", "interviewing", "offer"}
     if body.status not in valid:
         raise HTTPException(status_code=400, detail=f"status must be one of {valid}")
-    return db.upsert_application(job_id, body.status, body.notes)
+    db.update_job_status(job_id, body.status)
+    return {"updated": True, "status": body.status}
 
 
 @app.delete("/jobs/clear")
@@ -201,4 +245,25 @@ def download_resume(job_id: str):
     pdf_path = output.get("pdf_path")
     if not pdf_path or not os.path.exists(pdf_path):
         raise HTTPException(status_code=404, detail="PDF not found on disk")
-    return FileResponse(path=pdf_path, media_type="application/pdf", filename=f"resume_{job_id}.pdf")
+    return FileResponse(
+        path=pdf_path,
+        media_type="application/pdf",
+        filename=f"resume_{job_id}.pdf",
+    )
+
+
+# ── Settings ───────────────────────────────────────────────────────────────────
+
+class KeywordsBody(BaseModel):
+    keywords: list[str]
+
+
+@app.get("/settings/keywords")
+def get_keywords():
+    return {"keywords": _load_keywords()}
+
+
+@app.post("/settings/keywords")
+def update_keywords(body: KeywordsBody):
+    _save_keywords(body.keywords)
+    return {"keywords": body.keywords}

@@ -1,11 +1,9 @@
 import { Routes, Route, NavLink } from 'react-router-dom'
 import Jobs from './pages/Jobs'
-import Applications from './pages/Applications'
 import Settings from './pages/Settings'
 
 const NAV = [
   { to: '/', label: 'Jobs' },
-  { to: '/applications', label: 'Applications' },
   { to: '/settings', label: 'Settings' },
 ]
 
@@ -13,8 +11,8 @@ export default function App() {
   return (
     <div className="min-h-screen bg-gray-950 text-gray-100 flex flex-col">
       {/* Top nav */}
-      <nav className="border-b border-gray-800 bg-gray-950/80 backdrop-blur sticky top-0 z-50">
-        <div className="max-w-6xl mx-auto px-6 h-12 flex items-center justify-between">
+      <nav className="border-b border-gray-800 bg-gray-950/80 backdrop-blur sticky top-0 z-50 h-12 flex items-center px-6">
+        <div className="flex items-center justify-between w-full">
           <span className="text-sm font-semibold text-white tracking-tight">Internship Tracker</span>
           <div className="flex items-center gap-1">
             {NAV.map(({ to, label }) => (
@@ -38,10 +36,9 @@ export default function App() {
       </nav>
 
       {/* Page content */}
-      <main className="flex-1 max-w-6xl mx-auto w-full px-6 py-6">
+      <main className="flex-1 max-w-screen-2xl mx-auto w-full px-6 py-6 overflow-hidden">
         <Routes>
           <Route path="/" element={<Jobs />} />
-          <Route path="/applications" element={<Applications />} />
           <Route path="/settings" element={<Settings />} />
         </Routes>
       </main>

@@ -1,41 +1,42 @@
 # PROJECT.md — Personal Internship Intelligence System
+# Version: 3.0 (Final pre-build)
 
 ## Overview
 
-A personal job intelligence system for Chye Zhi Hao — Year 1 Applied Computing in Fintech student
-at SIT targeting Tech / Product / AI internships and junior roles in Singapore. The system scrapes
-job listings via LinkedIn MCP + JobSpy (Indeed fallback), scores each role against a master resume
-using Claude API, and surfaces a ranked shortlist via a polished React dashboard. For roles the user
-is keen on, a single button triggers an automated resume tailoring pipeline — generating an
-ATS-optimised, Jake's Resume-formatted PDF compiled server-side from LaTeX.
+A fully local, zero-cost personal internship intelligence system for Chye Zhi Hao —
+Year 1 Applied Computing in Fintech student at SIT targeting Tech / Product / AI
+internships and junior roles in Singapore.
 
-Inspired by ELZOS but with three key improvements:
-- AI-powered fit scoring and ranking (ELZOS has none)
-- Per-role resume tailoring with PDF download (ELZOS has none)
-- Cleaner, more polished UI with internship-specific filters
+Scrapes jobs from MyCareersFuture (primary) + Indeed via JobSpy (fallback).
+Scores each role locally using Ollama (Gemma 4 E4B IT).
+Surfaces a ranked two-panel dashboard (SupCareer-inspired, minimalist).
+On-demand resume tailoring per role using Ollama (qwen2.5:14b) → HTML → PDF download.
+
+No cloud APIs. No Supabase. No Docker. No LaTeX. Runs entirely on local machine.
 
 ---
 
 ## Goals
 
-- Aggregate job listings from LinkedIn (via MCP) + Indeed (via JobSpy fallback)
-- Score and rank every role against master resume using Claude API — ruthlessly honest, not optimistic
-- Surface a ranked shortlist with fit score, matched skills, gaps, and recommendation
-- Internship-specific filters: stipend range, duration, work arrangement, job type
-- Simple kanban tracker: Saved → Applied → Interviewing → Offer
-- On-demand: generate a tailored, ATS-optimised resume as downloadable PDF per role
-- Drag-and-drop .docx resume upload → auto-converted to markdown
-- Clean, polished UI — significantly better than ELZOS aesthetically
+- Aggregate internship/job listings from MCF + Indeed, deduplicated
+- Score and rank every role against master resume — ruthlessly honest scoring
+- Two-panel UI: job list left, JD detail right (SupCareer layout)
+- On-demand per-role resume tailoring → downloadable PDF
+- Resume output matches Jake's Resume style (reference: ChyeZhiHao_Aumovio resume)
+- Drag-and-drop .docx upload → auto-convert to master_resume.md
+- Simple status tracking per job (no kanban — status tag on job card)
+- Fully local: SQLite database, Ollama LLM, Playwright PDF generation
 
 ---
 
-## Non-Goals
+## Non-Goals (v1)
 
-- Automated job submission / one-click apply
-- Vector embeddings or semantic search
-- Email/Slack notifications
+- Kanban board (deferred to v2 — status tag is sufficient)
+- LinkedIn scraping (fragile — deferred to v2)
+- Cloud APIs of any kind
 - Multi-user support
-- Scheduled/cron pipeline runs (manual trigger only for now)
+- Scheduled/cron runs (manual trigger only)
+- LaTeX / pdflatex (replaced by HTML → PDF via Playwright)
 
 ---
 
@@ -43,14 +44,22 @@ Inspired by ELZOS but with three key improvements:
 
 | Layer | Tool | Notes |
 |---|---|---|
-| Job Sourcing (Primary) | LinkedIn MCP | Official MCP integration — stable, compliant, no session cookie hacks |
-| Job Sourcing (Fallback) | JobSpy (`pip install python-jobspy`) | Scrapes Indeed without API key |
-| Backend | Python (FastAPI) | REST API for all pipeline triggers + data access |
-| LLM Scoring + Tailoring | Claude API (`claude-sonnet-4-20250514`) | Anthropic SDK, reliable JSON output |
-| LaTeX Compiler | MiKTeX (Windows) | Compiles Jake's Resume .tex → PDF server-side |
-| Database | Supabase (free tier) | PostgreSQL — jobs, scores, applications, resume outputs |
-| Frontend | React + Vite + TailwindCSS | Polished dark-mode dashboard |
-| Resume Storage | Drag-and-drop .docx → auto-convert to markdown | Stored as `master_resume.md` |
+| Job Sourcing (Primary) | MyCareersFuture public REST API | No auth, structured JSON, SG-specific |
+| Job Sourcing (Fallback) | JobSpy (`python-jobspy`) | Scrapes Indeed, no API key |
+| Backend | Python (FastAPI) | Local REST API |
+| LLM — Scoring | Ollama `gemma4:4b-it-qat` | Fast, fits easily in 8GB VRAM |
+| LLM — Resume Tailoring | Ollama `qwen2.5:14b-instruct-q4_K_M` | Better structured output, fits 8GB VRAM |
+| PDF Generation | Playwright (headless Chromium) | HTML → PDF, zero compilation failures |
+| Database | SQLite (local file) | Zero latency, no account, no network |
+| Frontend | React + Vite + TailwindCSS | Two-panel layout, dark mode, minimalist |
+| Resume Storage | .docx drag-and-drop → markdown | Stored as `master_resume.md` |
+
+### GPU context (user machine)
+- GPU: NVIDIA GeForce RTX 3060 Ti (8GB VRAM)
+- RAM: 32GB
+- OS: Windows 11 Pro
+- gemma4:4b-it-qat: ~3.1GB VRAM — runs great, ~101 tok/s
+- qwen2.5:14b at q4_K_M: ~8GB VRAM — fits, slower but acceptable for on-demand use
 
 ---
 
@@ -59,142 +68,245 @@ Inspired by ELZOS but with three key improvements:
 ### Pipeline A — Job Ingestion + Scoring (manual trigger)
 
 ```
-[User clicks "Run Pipeline" in Dashboard]
+[User clicks "Run Pipeline"]
         ↓
-[Backend calls LinkedIn MCP → fetch job listings]
-        ↓ (if LinkedIn MCP fails or returns < 10 results)
-[Fallback: JobSpy scrapes Indeed]
+[scraper.py: fetch MCF jobs for each keyword]
+        ↓ (if MCF returns < 10 results for a keyword)
+[Fallback: JobSpy scrapes Indeed for that keyword]
         ↓
-[Deduplicate by URL → insert new jobs to Supabase]
+[Deduplicate by URL → insert new jobs to SQLite]
         ↓
-[For each unscored job → Claude API scoring call]
+[scorer.py: for each unscored job → Ollama gemma4:4b-it-qat]
         ↓
-[Claude returns: fit_score, matched_skills, gaps, recommendation, reasoning]
+[Returns: fit_score, matched_skills, gaps, recommendation, reasoning]
         ↓
-[Scores written to Supabase → dashboard re-renders ranked list]
+[Write scores to SQLite → dashboard refreshes ranked list]
 ```
 
 ### Pipeline B — Resume Tailoring (per-job, on-demand)
 
 ```
-[User clicks "Generate Resume" on a specific job card]
+[User clicks "Generate Resume" on a job]
         ↓
 [POST /resume/generate/{job_id}]
         ↓
-[Backend loads master_resume.md + jd_text for that job]
+[resume_tailor.py: load master_resume.md + jd_text]
         ↓
-[Claude API — Call 1: match score + top 5 missing keywords + ATS flags]
+[Ollama qwen2.5:14b — Call 1: gap analysis + experience selection + XYZ rewrite]
         ↓
-[Claude API — Call 2: select relevant experiences + XYZ bullet rewrite]
+[Ollama qwen2.5:14b — Call 2: generate HTML resume in Jake's Resume style]
         ↓
-[Claude API — Call 3: generate full main.tex using Jake's Resume template]
+[Playwright: render HTML → export PDF]
         ↓
-[pdflatex compiles main.tex → output.pdf (Windows: MiKTeX)]
+[Save PDF → serve via GET /resume/download/{job_id}]
         ↓
-[PDF served via GET /resume/download/{job_id}]
-        ↓
-[Job card shows: match score, ATS flags, "Download PDF" button]
+[Job panel shows: match score, ATS flags, "Download PDF" button]
 ```
 
 ---
 
-## Data Models
+## Ollama Setup (Windows)
 
-### Supabase SQL — run this in SQL Editor before starting Claude Code
+```bash
+# 1. Install Ollama from https://ollama.com/download
+# 2. Pull both models (do this before running Claude Code)
+ollama pull gemma4:e4b        # Scoring model — E4B variant, correct tag
+ollama pull qwen2.5:14b       # Tailoring model
 
-```sql
--- Table 1: jobs
-create table jobs (
-  id uuid default gen_random_uuid() primary key,
-  platform text,
-  title text,
-  company text,
-  location text,
-  work_arrangement text,
-  job_type text,
-  duration text,
-  stipend text,
-  jd_text text,
-  url text unique,
-  scraped_at timestamp default now(),
-  scored boolean default false,
-  scoring_failed boolean default false
-);
+# 3. Verify both are available
+ollama list
 
--- Table 2: job_scores
-create table job_scores (
-  id uuid default gen_random_uuid() primary key,
-  job_id uuid references jobs(id) on delete cascade,
-  fit_score integer,
-  matched_skills text[],
-  gaps text[],
-  recommendation text,
-  reasoning text,
-  scored_at timestamp default now()
-);
-
--- Table 3: applications
-create table applications (
-  id uuid default gen_random_uuid() primary key,
-  job_id uuid references jobs(id) on delete cascade,
-  status text default 'saved',
-  notes text,
-  applied_at timestamp,
-  updated_at timestamp default now()
-);
-
--- Table 4: resume_outputs
-create table resume_outputs (
-  id uuid default gen_random_uuid() primary key,
-  job_id uuid references jobs(id) on delete cascade,
-  match_score integer,
-  missing_keywords text[],
-  ats_flags text[],
-  latex_path text,
-  pdf_path text,
-  generation_failed boolean default false,
-  generated_at timestamp default now()
-);
+# 4. Ollama runs as a local server at http://localhost:11434
+# No API key needed — just keep Ollama running in the background
 ```
 
----
-
-## LinkedIn MCP Integration
-
-LinkedIn provides an official MCP server. The backend calls it through the Anthropic SDK's
-mcp_servers parameter — no separate MCP client needed.
-
-### Usage in scraper.py
+### Calling Ollama from Python
 
 ```python
-import anthropic, json, os
+import requests, json
 
-client = anthropic.Anthropic(api_key=os.environ["ANTHROPIC_API_KEY"])
+OLLAMA_BASE = "http://localhost:11434"
 
-def fetch_linkedin_jobs(keywords: str, location: str = "Singapore", max_results: int = 50) -> list:
-    message = client.messages.create(
-        model="claude-sonnet-4-20250514",
-        max_tokens=4000,
-        messages=[{
-            "role": "user",
-            "content": f"""Search LinkedIn for job listings matching: {keywords}
-Location: {location}
-Max results: {max_results}
+def ollama_chat(model: str, prompt: str, expect_json: bool = True) -> str:
+    payload = {
+        "model": model,
+        "prompt": prompt,
+        "stream": False,
+        "options": {
+            "temperature": 0.1,      # Low temp for consistent structured output
+            "num_predict": 2048,
+        }
+    }
+    if expect_json:
+        payload["format"] = "json"   # Ollama JSON mode — forces valid JSON output
 
-Return a JSON array. Each item must have these fields:
-title, company, location, work_arrangement, job_type, duration, stipend, jd_text, url
+    resp = requests.post(f"{OLLAMA_BASE}/api/generate", json=payload, timeout=120)
+    resp.raise_for_status()
+    return resp.json()["response"]
 
-Return ONLY the JSON array, no preamble or markdown fences."""
-        }],
-        mcp_servers=[{
-            "type": "url",
-            "url": "https://linkedin.mcp.claude.com/mcp",
-            "name": "linkedin"
-        }]
-    )
-    raw = message.content[0].text.strip()
-    cleaned = raw.removeprefix("```json").removesuffix("```").strip()
-    return json.loads(cleaned)
+# Model routing — use correct model per task
+SCORING_MODEL = "gemma4:e4b"
+TAILORING_MODEL = "qwen2.5:14b"
+```
+
+> **Always use `format: "json"`** for scoring calls. This is Ollama's JSON mode —
+> equivalent to OpenAI's response_format. Dramatically reduces malformed output.
+> For HTML generation (Call 2 of tailoring), do NOT use JSON mode — set expect_json=False.
+
+---
+
+## Database — SQLite
+
+Single local file. Zero latency. No server process.
+
+```python
+# db.py — use sqlite3 (stdlib, no pip install needed)
+import sqlite3, os
+
+DB_PATH = os.path.join(os.path.dirname(__file__), "jobs.db")
+
+def get_conn():
+    conn = sqlite3.connect(DB_PATH)
+    conn.row_factory = sqlite3.Row  # Return dict-like rows
+    return conn
+
+def init_db():
+    """Run once on startup to create tables if not exist."""
+    conn = get_conn()
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS jobs (
+            id TEXT PRIMARY KEY,
+            platform TEXT,
+            title TEXT,
+            company TEXT,
+            location TEXT,
+            work_arrangement TEXT,
+            job_type TEXT,
+            duration TEXT,
+            stipend TEXT,
+            jd_text TEXT,
+            url TEXT UNIQUE,
+            posted_date TEXT,
+            scraped_at TEXT DEFAULT (datetime('now')),
+            scored INTEGER DEFAULT 0,
+            scoring_failed INTEGER DEFAULT 0,
+            status TEXT DEFAULT 'new'
+        );
+
+        CREATE TABLE IF NOT EXISTS job_scores (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT REFERENCES jobs(id),
+            fit_score INTEGER,
+            matched_skills TEXT,   -- JSON array stored as string
+            gaps TEXT,             -- JSON array stored as string
+            recommendation TEXT,
+            reasoning TEXT,
+            scored_at TEXT DEFAULT (datetime('now'))
+        );
+
+        CREATE TABLE IF NOT EXISTS resume_outputs (
+            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            job_id TEXT REFERENCES jobs(id),
+            match_score INTEGER,
+            missing_keywords TEXT, -- JSON array stored as string
+            ats_flags TEXT,        -- JSON array stored as string
+            html_path TEXT,
+            pdf_path TEXT,
+            generation_failed INTEGER DEFAULT 0,
+            generated_at TEXT DEFAULT (datetime('now'))
+        );
+    """)
+    conn.commit()
+    conn.close()
+```
+
+> **Windows path note:** always use `os.path.join()` for DB_PATH and all file paths.
+> Never hardcode forward slashes anywhere in the codebase.
+
+---
+
+## Job Scraping
+
+### Verify MCF API fields FIRST (before Claude Code writes scraper.py)
+
+Run this in terminal before building and confirm the actual field names:
+
+```bash
+curl "https://api.mycareersfuture.gov.sg/v2/jobs?search=software+engineer+intern&limit=3" | python -m json.tool
+```
+
+Update the field mapping in scraper.py to match actual response. Do not assume.
+
+### MCF Scraper
+
+Field mapping verified against live API response on 2026-04-12.
+
+```python
+import requests, time, uuid, html, re
+
+MCF_BASE = "https://api.mycareersfuture.gov.sg/v2/jobs"
+HEADERS = {"User-Agent": "Mozilla/5.0"}
+
+def _strip_html(raw: str) -> str:
+    """Strip HTML tags and decode HTML entities from MCF description field."""
+    decoded = html.unescape(raw or "")
+    clean = re.sub(r"<[^>]+>", " ", decoded)
+    return re.sub(r"\s+", " ", clean).strip()
+
+def _extract_key_skills(skills: list) -> str:
+    """Extract isKeySkill=True skills as comma-separated string for scoring context."""
+    key = [s["skill"] for s in skills if s.get("isKeySkill")]
+    return ", ".join(key) if key else ""
+
+def _infer_job_type(employment_types: list, title: str) -> str:
+    for et in employment_types:
+        et_str = et.get("employmentType", "").lower()
+        if "intern" in et_str: return "internship"
+        if "contract" in et_str: return "contract"
+        if "part" in et_str: return "part-time"
+    title_lower = title.lower()
+    if "intern" in title_lower: return "internship"
+    return "full-time"
+
+def fetch_mcf_jobs(keyword: str, limit: int = 100) -> list:
+    params = {"search": keyword, "limit": limit, "page": 0}
+    try:
+        resp = requests.get(MCF_BASE, params=params, headers=HEADERS, timeout=15)
+        resp.raise_for_status()
+        results = resp.json().get("results", [])
+        jobs = []
+        for r in results:
+            title = r.get("title", "")
+            salary = r.get("salary") or {}
+            districts = r.get("address", {}).get("districts", [{}])
+            region = districts[0].get("region", "Singapore") if districts else "Singapore"
+            employment_types = r.get("employmentTypes", [])
+            key_skills = _extract_key_skills(r.get("skills", []))
+            jd_raw = _strip_html(r.get("description", ""))
+
+            # Append key skills to JD text for richer scoring context
+            jd_text = jd_raw
+            if key_skills:
+                jd_text += f"\n\nKey Skills: {key_skills}"
+
+            jobs.append({
+                "id": r.get("uuid", str(uuid.uuid4())),
+                "platform": "mycareersfuture",
+                "title": title,
+                "company": r.get("postedCompany", {}).get("name", ""),
+                "location": region,
+                "work_arrangement": employment_types[0].get("employmentType", "") if employment_types else "",
+                "job_type": _infer_job_type(employment_types, title),
+                "duration": "",           # Not in MCF API — parse from JD if needed
+                "stipend": f"SGD {salary.get('minimum', '')}–{salary.get('maximum', '')}/month" if salary.get("minimum") else "",
+                "jd_text": jd_text,
+                "posted_date": r.get("metadata", {}).get("newPostingDate", ""),
+                "url": r.get("metadata", {}).get("jobDetailsUrl", f"https://www.mycareersfuture.gov.sg/job/{r.get('uuid', '')}")
+            })
+        return jobs
+    except Exception as e:
+        print(f"MCF fetch failed for '{keyword}': {e}")
+        return []
 ```
 
 ### JobSpy Fallback (Indeed)
@@ -202,267 +314,322 @@ Return ONLY the JSON array, no preamble or markdown fences."""
 ```python
 from jobspy import scrape_jobs
 
-def fetch_indeed_jobs(keywords: str, location: str = "Singapore", max_results: int = 50) -> list:
-    df = scrape_jobs(
-        site_name=["indeed"],
-        search_term=keywords,
-        location=location,
-        results_wanted=max_results,
-        country_indeed="Singapore"
-    )
-    jobs = []
-    for _, row in df.iterrows():
-        jobs.append({
-            "platform": "indeed",
-            "title": row.get("title", ""),
-            "company": row.get("company", ""),
-            "location": row.get("location", ""),
-            "work_arrangement": row.get("job_type", ""),
-            "job_type": "",
-            "duration": "",
-            "stipend": str(row.get("min_amount", "")),
-            "jd_text": row.get("description", ""),
-            "url": row.get("job_url", "")
-        })
-    return jobs
+def fetch_indeed_jobs(keyword: str, limit: int = 50) -> list:
+    try:
+        df = scrape_jobs(
+            site_name=["indeed"],
+            search_term=keyword,
+            location="Singapore",
+            results_wanted=limit,
+            country_indeed="Singapore"
+        )
+        jobs = []
+        for _, row in df.iterrows():
+            jobs.append({
+                "id": str(uuid.uuid4()),
+                "platform": "indeed",
+                "title": row.get("title", ""),
+                "company": row.get("company", ""),
+                "location": row.get("location", ""),
+                "work_arrangement": row.get("job_type", ""),
+                "job_type": _infer_job_type(row.get("title", "")),
+                "duration": "",
+                "stipend": str(row.get("min_amount", "")),
+                "jd_text": row.get("description", ""),
+                "url": row.get("job_url", "")
+            })
+        return jobs
+    except Exception as e:
+        print(f"JobSpy fetch failed for '{keyword}': {e}")
+        return []
 ```
 
-### Scraper Logic (scraper.py main function)
+### Pipeline Orchestration
 
 ```python
-def run_scrape(keywords_list: list[str]) -> int:
-    """Returns number of new jobs inserted."""
+def run_scrape_pipeline(keywords: list[str]) -> int:
+    """Returns count of newly inserted jobs."""
     all_jobs = []
-    for keyword in keywords_list:
-        try:
-            jobs = fetch_linkedin_jobs(keyword)
-            if len(jobs) < 10:
-                raise ValueError("LinkedIn MCP returned too few results — falling back")
-            for j in jobs:
-                j["platform"] = "linkedin"
-            all_jobs.extend(jobs)
-        except Exception as e:
-            print(f"LinkedIn MCP failed for '{keyword}': {e} — using JobSpy fallback")
-            import time; time.sleep(2)
+    for keyword in keywords:
+        mcf_results = fetch_mcf_jobs(keyword)
+        if len(mcf_results) >= 10:
+            all_jobs.extend(mcf_results)
+        else:
+            print(f"MCF returned {len(mcf_results)} for '{keyword}' — using Indeed fallback")
+            time.sleep(2)
             all_jobs.extend(fetch_indeed_jobs(keyword))
-    return db.insert_jobs_deduplicated(all_jobs)  # returns count of newly inserted
+        time.sleep(1)  # Rate limit buffer between keywords
+
+    return db.insert_jobs_deduplicated(all_jobs)
 ```
 
 ---
 
-## Claude API Scoring
+## Scoring — Ollama (gemma4:4b-it-qat)
 
 ```python
-SCORING_PROMPT = """You are an expert tech recruiter evaluating a student candidate's fit for a role.
-Be ruthlessly honest — do not inflate scores. This candidate is a Year 1 university student
-competing against more experienced candidates. A score of 7+ means genuinely strong fit.
+SCORING_PROMPT = """You are a ruthlessly honest tech recruiter evaluating a student candidate.
+This is a Year 1 university student competing against candidates with more experience.
+Do NOT inflate scores. A score of 7+ means genuinely strong fit.
 
 CANDIDATE RESUME:
-{master_resume_text}
+{master_resume}
 
 JOB DESCRIPTION:
 {jd_text}
 
-Respond ONLY in valid JSON with no preamble or markdown fences:
-
+Respond in JSON only:
 {{
-  "fit_score": <integer 1-10>,
-  "matched_skills": [<skills from resume matching JD requirements>],
-  "gaps": [<JD requirements absent or weak in resume>],
-  "recommendation": "<Apply | Maybe | Skip>",
-  "reasoning": "<2-3 sentence honest summary of fit>"
+  "fit_score": <1-10>,
+  "matched_skills": ["skill1", "skill2"],
+  "gaps": ["gap1", "gap2"],
+  "recommendation": "Apply|Maybe|Skip",
+  "reasoning": "2-3 honest sentences"
 }}
 
-Scoring guide:
-- 8-10: Strong fit, most requirements met, apply immediately
-- 5-7: Partial fit, worth reviewing, 1-2 key gaps
-- 1-4: Weak fit, significant gaps, skip unless target company
+Scoring:
+- 8-10: Strong fit, apply immediately
+- 5-7: Partial fit, 1-2 gaps, worth reviewing
+- 1-4: Weak fit, skip unless dream company
 
 Target: Tech / Product / AI roles in Singapore."""
 
 def score_job(jd_text: str, master_resume: str) -> dict | None:
     if len(jd_text.strip()) < 100:
-        return None  # JD too short to score reliably
+        return None  # JD too short to score
+
+    prompt = SCORING_PROMPT.format(
+        master_resume=master_resume,
+        jd_text=jd_text[:3000]  # Truncate very long JDs to fit context window
+    )
+
     try:
-        message = client.messages.create(
-            model="claude-sonnet-4-20250514",
-            max_tokens=1000,
-            messages=[{"role": "user", "content": SCORING_PROMPT.format(
-                master_resume_text=master_resume,
-                jd_text=jd_text
-            )}]
-        )
-        raw = message.content[0].text.strip()
-        cleaned = raw.removeprefix("```json").removesuffix("```").strip()
-        data = json.loads(cleaned)
+        raw = ollama_chat(SCORING_MODEL, prompt, expect_json=True)
+        data = json.loads(raw)
         assert all(k in data for k in ["fit_score", "matched_skills", "gaps", "recommendation", "reasoning"])
         return data
     except Exception as e:
-        print(f"Scoring failed: {e}")
+        print(f"Scoring failed: {e}\nRaw: {raw[:200]}")
         return None
 ```
 
 ---
 
-## Resume Tailoring Pipeline
+## Resume Tailoring — 2-Call Pipeline (qwen2.5:14b)
 
-Three sequential Claude API calls. Never merge — each feeds the next.
-
-### Master Experience Pool (hardcoded in resume_tailor.py)
+### Master Experience Pool (hardcoded — DO NOT let the model invent or modify these)
 
 ```python
-MASTER_EXPERIENCE = """
-- ASM internship: Excel VBA automation (40% efficiency gain), KPI tracking,
-  cross-functional stakeholder work, quality/metrology checks
-- SingHacks 2025 (3rd place): Agentic AI system on Hedera, ERC-8004 identity,
-  X402 micropayments, Python
-- Gemini 3 Hackathon: BlitzJobz marketplace, AI-assisted SOP generation,
-  multimodal verification pipeline, UAT-style validation
-- Hello Future Hackathon: EZBiz multi-agent orchestration (Plan->Execute->Monitor),
-  competitor research, micropayments
-- CFA Investing Simulator: Top 10% global, risk management, market signal interpretation
-- NUS FinTech Summit 2026: Ripple Mart, TypeScript, XRPL SDK, escrow flows, merchant DID
-- Stock Market Trend Analysis: Python, Streamlit, pandas/NumPy, yfinance, benchmarking
-- Java 2D Game Engine: 42-class architecture, SOLID principles, Strategy/Factory/Template patterns
-"""
+# resume_tailor.py
 
 CANDIDATE_PROFILE = """
-Chye Zhi Hao — Year 1 Applied Computing in Fintech, SIT, graduating 2028.
-Diploma in Mechatronics & Robotics, Singapore Polytechnic (2023).
-Stack: Python, TypeScript/JavaScript, Java, React.js, Node.js, SQL, Hedera SDK, XRPL SDK.
-Tools: Excel VBA, Docker, Supabase, Git, Figma.
+Name: Chye Zhi Hao
+Contact: +65 88952590 | desmondchye321@gmail.com
+LinkedIn: linkedin.com/in/chye-zhi-hao | GitHub: github.com/BrownBOBAsushi
+
+Education:
+- Singapore Institute of Technology | B.Sc. Applied Computing in Fintech | Expected June 2028
+- Singapore Polytechnic | Diploma in Mechatronics and Robotics Engineering | April 2023
+  - Studied sensor systems, actuator control, electromechanical integration
+
+Stack: Python (primary), TypeScript/JavaScript, Java, SQL
+AI/LLM: Gemini API, context engineering, prompt design, RAG pipelines, agentic orchestration,
+         multimodal analysis, open-source (Llama, Mistral) and closed-source (GPT-4, Gemini) tradeoffs
+Tools: Git, Docker, VS Code, MongoDB, Qdrant, Supabase
+Languages: English (Native), Chinese (Native), Malay (Professional), Japanese (N4)
+"""
+
+# LOCKED experience pool — exact metrics, exact dates, never modify without updating source
+MASTER_EXPERIENCE = """
+1. ASM Assembly Systems Singapore — PLIC Supplier Management Intern | Sep 2022 – Feb 2023
+   - Reduced manual reporting time by 40% by automating KPI dashboards with Excel VBA
+   - Partnered with engineering and procurement teams to track quality metrics and surface defect trends
+   - Maintained technical documentation for recurring operational processes
+   NOTE: This MUST always appear in the resume — it is the only real work experience.
+
+2. SingHacks 2025 — 3rd Place | Agentic AI System (ERC-8004 + X402) | Python, Hedera SDK | Nov 2025
+   - Built multi-agent system where AI agents autonomously transact on Hedera testnet, placing Top 3
+   - Implemented identity authorization (ERC-8004 registry) and X402 micropayment flows
+   - Delivered live technical demo to judges under time pressure
+
+3. BlitzJobz — AI Micro-Shift Marketplace | Gemini 3 Hackathon | Python, Gemini API | Jan 2026
+   - Integrated Gemini 3 to generate AI-assisted SOPs for job checklists via context engineering
+   - Built multimodal verification pipeline using before/after video analysis to score task completion
+   - Defined UAT-style acceptance criteria for matching logic and edge cases
+
+4. EZBiz — Multi-Agent Orchestration Platform | Hello Future Hackathon | Python, Gemini API | Jan 2026
+   - Designed Plan/Execute/Monitor agentic loop for autonomous opportunity discovery and execution
+   - Implemented verifiable agent authorization using identity registry and micropayment concepts
+
+5. Telegram RAG Bot | Python, Gemini API, Qdrant, MongoDB | Mar 2026
+   - Built end-to-end RAG pipeline integrating Qdrant vector search with MongoDB
+   - Improved retrieval precision by tuning vector indexing parameters and retrieval depth
+
+6. NUS FinTech Summit 2026 — Ripple Mart | TypeScript, XRPL SDK, Node.js | 2026
+   - Engineered TypeScript platform with XRPL SDK, implementing automated escrow flows and merchant DID
 """
 ```
 
-### Call 1 — Gap Analysis + ATS Audit
+### Call 1 — Gap Analysis + Experience Selection + XYZ Rewrite
 
-```
-You are an expert ATS system and tech recruiter.
+```python
+TAILORING_CALL1_PROMPT = """You are a professional resume writer for student internship applications.
+Be ruthlessly selective. A bloated resume is a weak resume.
 
 CANDIDATE PROFILE:
 {candidate_profile}
 
+MASTER EXPERIENCE POOL:
+{master_experience}
+
 JOB DESCRIPTION:
 {jd_text}
 
-Respond ONLY in valid JSON with no preamble:
-{
-  "match_score": <integer 0-100>,
-  "missing_keywords": [<top 5 keywords from JD absent in candidate profile>],
-  "hard_blockers": [<requirements candidate clearly cannot meet>],
-  "ats_flags": [<formatting issues or missing sections ATS bots penalise>]
-}
-```
-
-### Call 2 — Experience Selection + XYZ Rewrite
-
-```
-You are a professional resume writer for student internship applications.
-
-CANDIDATE PROFILE: {candidate_profile}
-MASTER EXPERIENCE POOL: {master_experience}
-JOB DESCRIPTION: {jd_text}
-MISSING KEYWORDS TO EMBED: {missing_keywords}
-
 Instructions:
-- Select ONLY the 3-4 most relevant experiences from the master pool
-- Rewrite each as 2-3 bullets: "Accomplished X, as measured by Y, by doing Z"
-- Embed missing keywords where truthful
-- Do NOT invent metrics — only use what is in the pool
-- Lead with projects/hackathons over internship if role is technical
+1. Identify top 5 keywords missing from candidate profile but present in JD
+2. Select ONLY the 3-4 most relevant experiences from the master pool for this specific JD
+   - ASM internship MUST always be included (only real work experience)
+   - Choose remaining 2-3 projects based on JD relevance
+3. Rewrite each experience as 2-3 bullets using Google XYZ formula:
+   "Accomplished [X], as measured by [Y], by doing [Z]"
+   - Use real metrics from the pool — do NOT invent new ones
+   - Naturally embed missing keywords where truthful
+4. Select 6-8 most relevant technical skills for this JD
 
-Respond ONLY in valid JSON:
-{
+Respond in JSON only:
+{{
+  "missing_keywords": ["kw1", "kw2", "kw3", "kw4", "kw5"],
+  "ats_flags": ["issue1", "issue2"],
   "selected_experiences": [
-    {"title": "<name>", "bullets": ["<bullet 1>", "<bullet 2>"]}
+    {{
+      "title": "Role/Project Title",
+      "subtitle": "Company/Event | Tech Stack | Date",
+      "bullets": ["XYZ bullet 1", "XYZ bullet 2", "XYZ bullet 3"]
+    }}
   ],
-  "skills_to_highlight": [<8-10 most relevant skills>]
-}
+  "selected_skills": {{
+    "programming": ["lang1", "lang2"],
+    "ai_llm": ["tool1", "tool2"],
+    "tools": ["tool1", "tool2"]
+  }},
+  "match_score": <0-100>
+}}"""
 ```
 
-### Call 3 — LaTeX Generation (Jake's Resume)
-
-```
-You are a LaTeX expert. Generate a complete main.tex using Jake's Resume template.
-
-CANDIDATE PROFILE: {candidate_profile}
-SELECTED EXPERIENCES: {selected_experiences}
-SKILLS: {skills_to_highlight}
-APPLYING FOR: {job_title} at {company}
-
-Rules:
-- Jake's Resume template sections: Education, Experience, Projects, Technical Skills
-- 1 page only
-- No tables or multi-column layouts in main content (breaks ATS)
-- Standard section headers only
-- Do not hallucinate any data not provided
-- Output ONLY the complete main.tex — no explanation, no markdown fences
-
-Jake's Resume base (complete the document):
-\documentclass[letterpaper,11pt]{article}
-\usepackage{latexsym}
-\usepackage[empty]{fullpage}
-\usepackage{titlesec}
-\usepackage[usenames,dvipsnames]{color}
-\usepackage{enumitem}
-\usepackage[hidelinks]{hyperref}
-\usepackage{fancyhdr}
-\usepackage[english]{babel}
-\usepackage{tabularx}
-\input{glyphtounicode}
-\pagestyle{fancy}
-\fancyhf{}
-\fancyfoot{}
-\renewcommand{\headrulewidth}{0pt}
-\addtolength{\oddsidemargin}{-0.5in}
-\addtolength{\textwidth}{1in}
-\addtolength{\topmargin}{-.5in}
-\addtolength{\textheight}{1.0in}
-\raggedbottom\raggedright
-\setlength{\tabcolsep}{0in}
-\pdfgentounicode=1
-```
-
-### LaTeX Compilation (Windows-safe)
+### Call 2 — HTML Resume Generation (Jake's Resume Style)
 
 ```python
-import subprocess, os
+TAILORING_CALL2_PROMPT = """You are a web developer generating a resume as HTML.
+The output must look EXACTLY like Jake's Resume template — clean, single column, minimal.
 
-def compile_latex(tex_content: str, job_id: str) -> str:
-    # WINDOWS: always os.path.join — never hardcode forward slashes
+CANDIDATE PROFILE:
+{candidate_profile}
+
+SELECTED EXPERIENCES (already written in XYZ format):
+{selected_experiences_json}
+
+SELECTED SKILLS:
+{selected_skills_json}
+
+JOB APPLYING FOR: {job_title} at {company}
+
+Generate a complete, self-contained HTML file with inline CSS.
+The resume must match this exact visual style:
+- Background: white (#ffffff)
+- Font: 'Times New Roman', serif — 11px base
+- Max width: 750px, centered, padding 40px
+- Name: 24px bold, centered, black
+- Contact line: 10px, centered, gray (#555), links underlined
+- Section headers: 13px bold uppercase, black, with full-width bottom border 1px solid black, margin-top 12px
+- Company/Project name: bold, float left. Date: float right. Clear float after.
+- Role/subtitle: italic, font-size 10px
+- Bullets: margin-left 15px, font-size 10px, line-height 1.4, margin-bottom 2px
+- Skills section: "Category:" bold inline, then comma-separated values normal weight
+- No colors other than black, white, gray
+- No tables, no flexbox columns for main content
+- Page size: A4 — add CSS: @page {{ size: A4; margin: 15mm; }}
+
+OUTPUT: Complete HTML only — no explanation, no markdown fences, no preamble.
+Start with <!DOCTYPE html> and end with </html>."""
+```
+
+### Playwright PDF Compilation
+
+```python
+# resume_tailor.py
+import asyncio, os
+from playwright.async_api import async_playwright
+
+async def html_to_pdf(html_content: str, job_id: str) -> str:
+    # WINDOWS: always os.path.join — never hardcode slashes
     output_dir = os.path.join("generated_resumes", job_id)
     os.makedirs(output_dir, exist_ok=True)
 
-    tex_path = os.path.join(output_dir, "main.tex")
-    pdf_path = os.path.join(output_dir, "main.pdf")
+    html_path = os.path.join(output_dir, "resume.html")
+    pdf_path = os.path.join(output_dir, "resume.pdf")
 
-    # encoding="utf-8" is mandatory on Windows
-    with open(tex_path, "w", encoding="utf-8") as f:
-        f.write(tex_content)
+    # Write HTML — encoding="utf-8" mandatory on Windows
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
 
-    # Run twice — LaTeX needs two passes for correct layout
-    for _ in range(2):
-        subprocess.run(
-            ["pdflatex", "-interaction=nonstopmode",
-             f"-output-directory={output_dir}", tex_path],
-            capture_output=True, text=True, timeout=60
+    async with async_playwright() as p:
+        browser = await p.chromium.launch()
+        page = await browser.new_page()
+        await page.goto(f"file:///{os.path.abspath(html_path)}")
+        await page.pdf(
+            path=pdf_path,
+            format="A4",
+            print_background=True,
+            margin={"top": "15mm", "bottom": "15mm", "left": "15mm", "right": "15mm"}
         )
+        await browser.close()
 
-    # pdflatex can exit 0 on soft errors — always verify PDF is real
     if not os.path.exists(pdf_path) or os.path.getsize(pdf_path) == 0:
-        log_path = os.path.join(output_dir, "main.log")
-        log = open(log_path, encoding="utf-8").read() if os.path.exists(log_path) else "No log"
-        raise RuntimeError(f"pdflatex produced no valid PDF.\nLog:\n{log}")
+        raise RuntimeError(f"Playwright PDF generation failed for job {job_id}")
 
     return pdf_path
+
+def compile_resume(html_content: str, job_id: str) -> str:
+    return asyncio.run(html_to_pdf(html_content, job_id))
 ```
 
-> **Windows — install MiKTeX before running Claude Code:**
-> 1. Download from **https://miktex.org/download**
-> 2. Run installer → "Install for all users" → set missing packages to **Yes (auto)**
-> 3. Open a **new** Command Prompt and run: `pdflatex --version`
->
-> All paths in resume_tailor.py must use `os.path.join()`. All file writes must use `encoding="utf-8"`.
+> **Playwright Windows setup (run before Claude Code):**
+> ```bash
+> pip install playwright
+> playwright install chromium
+> ```
+> This downloads Chromium (~300MB). Do it once before building.
+
+---
+
+## Master Resume Upload (.docx → markdown)
+
+```python
+# resume_converter.py
+import os
+from docx import Document
+from markdownify import markdownify
+
+def convert_docx_to_markdown(docx_bytes: bytes) -> str:
+    import tempfile
+    # Write to temp file — docx library needs a file path
+    with tempfile.NamedTemporaryFile(suffix=".docx", delete=False) as tmp:
+        tmp.write(docx_bytes)
+        tmp_path = tmp.name
+
+    try:
+        doc = Document(tmp_path)
+        full_text = "\n".join([para.text for para in doc.paragraphs if para.text.strip()])
+        return full_text
+    finally:
+        os.unlink(tmp_path)
+
+def save_master_resume(docx_bytes: bytes) -> None:
+    text = convert_docx_to_markdown(docx_bytes)
+    resume_path = os.path.join(os.path.dirname(__file__), "master_resume.md")
+    with open(resume_path, "w", encoding="utf-8") as f:
+        f.write(text)
+```
 
 ---
 
@@ -471,50 +638,37 @@ def compile_latex(tex_content: str, job_id: str) -> str:
 ```
 internship-tracker/
 ├── backend/
-│   ├── main.py                  # FastAPI app
-│   ├── scraper.py               # LinkedIn MCP + JobSpy fallback
-│   ├── scorer.py                # Claude API scoring
-│   ├── resume_tailor.py         # 3-step Claude tailoring + pdflatex
-│   ├── resume_converter.py      # .docx -> markdown
-│   ├── db.py                    # Supabase client + queries
+│   ├── main.py                  # FastAPI app — all endpoints
+│   ├── scraper.py               # MCF API + JobSpy fallback
+│   ├── scorer.py                # Ollama gemma4:4b scoring
+│   ├── resume_tailor.py         # 2-call qwen2.5:14b tailoring + Playwright PDF
+│   ├── resume_converter.py      # .docx → plain text
+│   ├── db.py                    # SQLite — init + all queries
+│   ├── jobs.db                  # SQLite database file (auto-created)
 │   ├── master_resume.md         # Auto-generated from .docx upload
-│   ├── generated_resumes/       # {job_id}/main.tex + main.pdf
+│   ├── generated_resumes/       # {job_id}/resume.html + resume.pdf
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
 │   │   ├── App.jsx
 │   │   ├── components/
-│   │   │   ├── JobBoard.jsx
-│   │   │   ├── JobCard.jsx
-│   │   │   ├── FilterBar.jsx
-│   │   │   ├── SearchBar.jsx
-│   │   │   ├── KanbanBoard.jsx
-│   │   │   ├── KanbanCard.jsx
-│   │   │   ├── PipelineButton.jsx
-│   │   │   ├── ResumeUploader.jsx
-│   │   │   └── ResumeGenerator.jsx
+│   │   │   ├── JobList.jsx          # Left panel — scrollable job list
+│   │   │   ├── JobDetail.jsx        # Right panel — full JD + actions
+│   │   │   ├── FilterBar.jsx        # Top filter strip
+│   │   │   ├── SearchBar.jsx        # Keyword search
+│   │   │   ├── ScoreBadge.jsx       # Fit score chip (green/yellow/red)
+│   │   │   ├── PipelineButton.jsx   # Run pipeline + status
+│   │   │   ├── ResumeUploader.jsx   # .docx drag-and-drop
+│   │   │   └── ResumeGenerator.jsx  # Generate button + download
 │   │   ├── pages/
-│   │   │   ├── Jobs.jsx
-│   │   │   ├── Applications.jsx
-│   │   │   └── Settings.jsx
+│   │   │   ├── Dashboard.jsx        # Main two-panel view
+│   │   │   └── Settings.jsx         # Resume upload + keyword config
 │   │   └── main.jsx
 │   ├── index.html
 │   └── package.json
-├── .env
+├── .env                         # Empty — no API keys needed
 └── README.md
 ```
-
----
-
-## Environment Variables
-
-```
-ANTHROPIC_API_KEY=
-SUPABASE_URL=
-SUPABASE_ANON_KEY=
-```
-
-> No Apify token needed. LinkedIn MCP uses the Anthropic API key. JobSpy needs no key.
 
 ---
 
@@ -522,114 +676,180 @@ SUPABASE_ANON_KEY=
 
 | Method | Endpoint | Description |
 |---|---|---|
-| POST | `/pipeline/run` | Trigger scrape + score pipeline (runs as background task) |
-| GET | `/pipeline/status` | Idle / Scraping / Scoring / Done |
-| GET | `/jobs` | All scored jobs. Params: `min_score`, `platform`, `arrangement`, `job_type`, `search` |
-| GET | `/jobs/{id}` | Single job detail |
-| PATCH | `/jobs/{id}/status` | Update kanban status |
-| DELETE | `/jobs/clear` | Clear all jobs |
+| POST | `/pipeline/run` | Trigger scrape + score (background task) |
+| GET | `/pipeline/status` | idle / scraping / scoring / done |
+| GET | `/jobs` | All scored jobs. Params: `min_score`, `platform`, `arrangement`, `job_type`, `search`, `recommendation` |
+| GET | `/jobs/{id}` | Single job with score detail |
+| PATCH | `/jobs/{id}/status` | Update status tag (new/saved/applied/interviewing/offer) |
+| DELETE | `/jobs/clear` | Clear all jobs + scores |
 | POST | `/resume/upload` | .docx upload → convert → save master_resume.md |
-| GET | `/resume` | Return current master_resume.md content |
-| POST | `/resume/generate/{job_id}` | Trigger 3-step tailoring pipeline |
+| GET | `/resume` | Return master_resume.md content + last updated |
+| POST | `/resume/generate/{job_id}` | Trigger 2-call tailoring + PDF |
 | GET | `/resume/status/{job_id}` | pending / generating / done / failed |
-| GET | `/resume/download/{job_id}` | Stream PDF for download |
+| GET | `/resume/download/{job_id}` | Stream PDF |
+| GET | `/settings/keywords` | Get current scrape keyword list |
+| POST | `/settings/keywords` | Update scrape keyword list |
 
 ---
 
-## Dashboard UI Requirements
+## Frontend UI — Two Panel Layout (SupCareer-inspired, minimalist)
 
-### Design Direction
-Dark mode default. Clean card-based layout. Colour-coded scores. Smooth transitions.
-Reference aesthetic: Linear, Raycast, Vercel dashboard. Significantly better than ELZOS.
+### Design Principles
+- Dark mode default (`#0a0a0a` background, `#1a1a1a` panels)
+- Single accent color: indigo/purple (`#6366f1`)
+- No gradients, no shadows, minimal borders
+- Typography: Inter font
+- Reference: SupCareer layout, Linear aesthetic
 
-### Page 1 — Jobs
-- Top bar: "Run Pipeline" button + last run timestamp + status chip
-- Search bar: keyword search across title, company, JD text (client-side, instant)
-- Filter bar (collapsible):
-  - Platform: LinkedIn / Indeed
-  - Fit score: min slider (1–10)
-  - Recommendation: Apply / Maybe / Skip (toggle chips)
-  - Work arrangement: Remote / Hybrid / On-site
-  - Job type: Internship / Full-time / Contract / Part-time
-  - Duration: 3 months / 6 months / 12 months
-  - Stipend: None / <SGD 1000 / SGD 1000–2000 / >SGD 2000
-- Job grid sorted by fit_score descending
-- Job card (collapsed): title, company, platform badge, arrangement tag, fit score chip, recommendation badge
-- Job card (expanded):
-  - Claude reasoning
-  - Matched skills (green tags) + Gaps (red tags)
-  - Stipend + duration
-  - Link to original JD
-  - "Generate Resume" button → status polling → "Download PDF" when done
-  - ATS flags (shown after generation)
-  - "Save to Tracker" button
+### Layout
 
-### Page 2 — Applications (Kanban)
-- 4 columns: Saved / Applied / Interviewing / Offer
-- Drag-and-drop between columns using @dnd-kit/core
-- Card: title, company, fit score, platform badge
-- Expanded card: notes, applied date, JD link, PDF link if generated
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  HEADER: Logo | Run Pipeline [btn] | Status chip | Settings     │
+├────────────────────────┬────────────────────────────────────────┤
+│  FILTER BAR (full width across both panels)                     │
+│  Search | Platform | Score | Recommendation | Arrangement | Type│
+├────────────────────────┼────────────────────────────────────────┤
+│  LEFT PANEL (380px)    │  RIGHT PANEL (flex-1)                  │
+│  Scrollable job list   │  Selected job detail                   │
+│                        │                                        │
+│  [Job Card]            │  Title — Company — Location            │
+│  Title                 │  Type badge | Arrangement | Stipend    │
+│  Company · Location    │  Posted date | Match score             │
+│  Score · Rec badge     │  ─────────────────────────────         │
+│  Type · Arrangement    │  Matched Skills (green pills)          │
+│  Status tag            │  Gaps (red pills)                      │
+│                        │  ─────────────────────────────         │
+│  [Job Card]            │  Claude reasoning paragraph            │
+│  ...                   │  ─────────────────────────────         │
+│                        │  Full JD text (scrollable)             │
+│                        │  ─────────────────────────────         │
+│                        │  [Apply →] [Generate Resume] [Save]   │
+│                        │  Status dropdown                       │
+│                        │  (after generation: Download PDF btn)  │
+│                        │  ATS flags (shown post-generation)     │
+└────────────────────────┴────────────────────────────────────────┘
+```
 
-### Page 3 — Settings
+### Job Card (left panel)
+- Title bold, 14px
+- Company · Location, 12px gray
+- Row: ScoreBadge (green/yellow/red) + Recommendation chip + Platform badge
+- Row: Job type tag + Arrangement tag
+- Status tag (new / saved / applied / interviewing / offer) — colored dot
+- Selected state: indigo left border, slightly lighter background
+- Hover: subtle background lift
+
+### Filter Bar
+- Platform: MCF / Indeed (toggle chips)
+- Fit score: min slider 1–10
+- Recommendation: Apply / Maybe / Skip (toggle chips)
+- Work arrangement: Remote / Hybrid / On-site (toggle chips)
+- Job type: Internship / Full-time / Contract (toggle chips)
+- All filters client-side — instant, no API call
+
+### Settings Page
 - .docx drag-and-drop uploader
 - Last updated timestamp
-- Read-only markdown preview of master_resume.md
-- Editable keyword list for pipeline scrape (e.g. "software engineer intern", "AI engineer intern")
+- Read-only preview of master_resume.md
+- Editable keyword list (add/remove scrape keywords)
+- Default keywords: ["software engineer intern", "product manager intern",
+  "AI engineer intern", "fintech intern", "full stack intern", "data analyst intern"]
 
 ---
 
 ## Build Order for Claude Code
 
-Follow exactly. Do not skip ahead.
+Follow exactly. Verify each step before proceeding.
 
-1. **System check** — `pdflatex --version`. If missing: halt, tell user to install MiKTeX from https://miktex.org/download
-2. **Supabase** — run 4-table SQL above. Confirm tables exist before proceeding.
-3. **Backend: db.py** — Supabase client, CRUD helpers for all 4 tables
-4. **Backend: resume_converter.py** — .docx → markdown via python-docx + markdownify
-5. **Backend: scraper.py** — LinkedIn MCP fetch + JobSpy Indeed fallback + deduplication logic
-6. **Backend: scorer.py** — Claude API scoring with JSON parsing + fallback
-7. **Backend: resume_tailor.py** — 3 sequential Claude calls + pdflatex. All paths: os.path.join(). All writes: encoding="utf-8"
-8. **Backend: main.py** — FastAPI, all endpoints, pipeline as background task
-9. **Test Pipeline A** — scrape → check Supabase jobs table → check job_scores table
-10. **Test Pipeline B** — /resume/generate/{job_id} → verify PDF in generated_resumes/
-11. **Frontend: scaffold** — Vite + React + Tailwind + React Router. Dark mode default.
-12. **Frontend: Settings page** — ResumeUploader first (foundation for everything)
-13. **Frontend: Jobs page** — JobBoard, JobCard, FilterBar, SearchBar, PipelineButton
-14. **Frontend: ResumeGenerator** — button, polling, download
-15. **Frontend: Applications page** — KanbanBoard with @dnd-kit/core drag-and-drop
-16. **Polish** — loading skeletons, empty states, transitions, consistent spacing
+1. **Pre-flight checks:**
+   - `ollama list` — confirm both models are pulled
+   - `playwright install chromium` — confirm Chromium installed
+   - Curl MCF API and inspect actual JSON field names
+   - Update scraper.py field mapping to match real response
+
+2. **Backend: db.py** — SQLite init, all CRUD helpers. Verify `jobs.db` created.
+
+3. **Backend: resume_converter.py** — .docx bytes → plain text via python-docx
+
+4. **Backend: scraper.py** — MCF fetch + JobSpy fallback + deduplication.
+   Test: run manually, print first 3 results, verify fields populated.
+
+5. **Backend: scorer.py** — Ollama gemma4:4b scoring with JSON mode.
+   Test: score one job manually, verify JSON parses correctly.
+
+6. **Backend: resume_tailor.py** — 2-call qwen2.5:14b pipeline + Playwright PDF.
+   Test: run on one real job, verify HTML generated, verify PDF opens correctly.
+
+7. **Backend: main.py** — FastAPI, all endpoints. Pipeline as BackgroundTask.
+   Test: curl each endpoint.
+
+8. **Integration test:** Full pipeline A → check SQLite has jobs + scores.
+   Full pipeline B → check generated_resumes/{id}/resume.pdf exists and renders.
+
+9. **Frontend: scaffold** — Vite + React + Tailwind. Dark mode. Inter font.
+
+10. **Frontend: Settings page** — ResumeUploader + keyword editor. Test upload flow.
+
+11. **Frontend: Dashboard — left panel** — JobList + JobCard + FilterBar + SearchBar.
+    Client-side filtering only. No API call on filter change.
+
+12. **Frontend: Dashboard — right panel** — JobDetail with full JD, score display,
+    matched skills, gaps, reasoning, status dropdown.
+
+13. **Frontend: ResumeGenerator** — Generate button, status polling every 3s,
+    Download PDF button on completion, ATS flags display.
+
+14. **Frontend: PipelineButton** — trigger + poll /pipeline/status every 5s.
+
+15. **Polish:** Loading skeletons, empty states, error toasts, consistent spacing.
 
 ---
 
 ## Constraints & Gotchas
 
-- **LinkedIn MCP fallback.** If MCP returns < 10 results or throws, silently fall through to JobSpy. Never surface MCP failure as a user-facing error.
-- **JobSpy rate limiting.** `time.sleep(2)` between keyword searches. Max 3 keyword searches per pipeline run.
-- **Claude rate limits.** `time.sleep(1)` between scoring calls. Sequential only — never parallelise.
-- **JSON parsing.** Strip markdown fences before JSON.loads(). Validate required keys. On failure: scoring_failed=true, log raw, continue.
-- **Short JDs.** If jd_text < 100 chars: skip scoring, mark scoring_failed=true with reason "JD too short".
-- **Resume tailoring calls are sequential.** Pass Call 1 output into Call 2 prompt. Pass Call 2 output into Call 3 prompt. Never merge or skip.
-- **LaTeX from Claude is imperfect.** Run pdflatex twice. If PDF still invalid: generation_failed=true, save .tex for manual debug.
-- **Windows paths.** Every path: os.path.join(). Every file open: encoding="utf-8". No exceptions anywhere in the codebase.
-- **MiKTeX first run is slow.** It auto-downloads missing LaTeX packages on first compile. Subsequent runs are fast. This is expected behaviour.
-- **Deduplication.** Supabase unique constraint on url column handles DB-level dedup. Catch constraint violation in Python and skip silently.
-- **master_resume.md.** Read fresh from disk at start of each pipeline run — never cache at startup.
-- **Kanban drag-and-drop.** Use @dnd-kit/core — react-beautiful-dnd is unmaintained, do not use it.
-- **Pipeline as background task.** POST /pipeline/run must return immediately with 202 Accepted. Run the actual scrape+score as a FastAPI BackgroundTask. Frontend polls /pipeline/status.
+- **Ollama must be running** before starting the backend. Add a startup check in main.py:
+  ping `http://localhost:11434/api/tags` on FastAPI startup. If unreachable, log clear error.
+- **qwen2.5:14b is slow** — resume generation takes 30–90 seconds on RTX 3060 Ti.
+  Frontend must show clear "Generating..." state. Never let user think it crashed.
+- **JSON mode for scoring** — always pass `format: "json"` to Ollama. Without it, small
+  models frequently wrap JSON in markdown fences or add preamble text.
+- **HTML generation — no JSON mode** — Call 2 generates HTML, not JSON.
+  Set `expect_json=False`. Parse the raw string directly.
+- **MCF field names** — verify against live API before coding. Fields like `postedCompany`,
+  `position.title`, `employmentTypes` are community-observed, not officially documented.
+  They may have changed. Always curl first.
+- **ASM internship must always appear** — hardcode this rule in the Call 1 prompt.
+  It is the only real work experience and must never be omitted.
+- **Do not invent metrics** — the model must only use metrics from MASTER_EXPERIENCE.
+  "40% reduction" and "Top 3" are real. Any other numbers are hallucinated.
+- **Windows paths** — every file path: `os.path.join()`. Every file open: `encoding="utf-8"`.
+  No exceptions anywhere in the codebase.
+- **SQLite concurrency** — FastAPI background tasks + main thread both write to SQLite.
+  Use `check_same_thread=False` in sqlite3.connect() and add a threading.Lock() around writes.
+- **JD truncation** — truncate jd_text to 3000 chars before sending to scoring model.
+  Small context windows on 4B models — long JDs cause degraded output.
+- **Deduplication** — UNIQUE constraint on `url` in SQLite. Catch `IntegrityError` in
+  insert function and skip silently.
+- **Pipeline as BackgroundTask** — POST /pipeline/run returns 202 immediately.
+  Store pipeline state in a module-level dict, not SQLite (avoid concurrency issues).
+- **Resume HTML must be self-contained** — no external fonts, no CDN links.
+  Playwright renders offline. Use system fonts (Times New Roman) or base64-embed fonts.
 
 ---
 
 ## Success Criteria
 
-- LinkedIn MCP fetches at least 20 real listings per pipeline run
-- JobSpy fallback activates automatically when LinkedIn MCP returns < 10 results
-- Claude scoring returns valid JSON for >95% of JDs
-- Dashboard renders ranked list within 2 seconds
-- All 7 filter types work independently and in combination
-- Keyword search returns results within 300ms (client-side)
-- Resume PDF generated within 60 seconds of button click
-- Kanban drag-and-drop persists to Supabase
-- UI is visibly cleaner than ELZOS — dark mode, consistent design language
+- MCF API returns ≥ 20 real Singapore listings per pipeline run per keyword
+- JobSpy fallback activates automatically when MCF returns < 10 results
+- Ollama scoring returns valid JSON for > 90% of JDs (JSON mode enforced)
+- Full pipeline A (scrape + score 50 jobs) completes in < 5 minutes
+- Resume PDF generated within 90 seconds of button click
+- PDF visually matches Jake's Resume style (single column, serif font, section rules)
+- ASM internship appears in every generated resume without exception
+- All filters work client-side, instant response
+- Dashboard renders in < 1 second (all data local, no network)
+- Status tags persist across page refresh
 
 ---
 
@@ -638,30 +858,57 @@ Follow exactly. Do not skip ahead.
 ```
 fastapi
 uvicorn
-supabase
-anthropic
 python-jobspy
 python-docx
 markdownify
 python-multipart
+playwright
+requests
 ```
+
+> No anthropic, no supabase, no groq. Zero paid dependencies.
 
 ## Frontend package.json additions
 
 ```
 react-router-dom
-@dnd-kit/core
-@dnd-kit/sortable
-@dnd-kit/utilities
+```
+
+> No @dnd-kit needed — kanban dropped for v1.
+
+---
+
+## Environment Variables
+
+```
+# .env is intentionally almost empty
+# Ollama runs on localhost:11434 — no key needed
+# SQLite is a local file — no connection string needed
+OLLAMA_BASE_URL=http://localhost:11434
 ```
 
 ---
 
-## v2 Ideas (out of scope for now)
+## Pre-Build Checklist (complete before opening Claude Code)
 
+- [ ] Ollama installed and running (`ollama serve`)
+- [ ] `ollama pull gemma4:e4b` completed (correct tag — NOT gemma4:4b-it-qat)
+- [ ] `ollama pull qwen2.5:14b` completed
+- [ ] `playwright install chromium` completed
+- [ ] MiKTeX NOT needed — LaTeX dropped, using Playwright
+- [ ] MCF API field mapping VERIFIED ✅ (done 2026-04-12, fields confirmed)
+- [ ] Python 3.10+ installed and in PATH
+- [ ] Node 18+ installed (`node --version`)
+- [ ] Project folder created: `internship-tracker/`
+
+---
+
+## v2 Backlog
+
+- Kanban board (Saved → Applied → Interviewing → Offer) with drag-and-drop
+- LinkedIn scraping (via stickerdaniel/linkedin-mcp-server when Docker is set up)
+- JobStreet integration
 - Cover letter generation per role
 - Interview prep questions per role
 - Scheduled pipeline runs
-- JobStreet + MyCareersFuture integration
-- Browser extension to manually add jobs from any board
-- Email digest of top new roles each morning
+- Browser extension to manually add jobs from any job board

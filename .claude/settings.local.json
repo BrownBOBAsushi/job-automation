@@ -2,7 +2,10 @@
   "permissions": {
     "allow": [
       "Bash(mkdir -p /c/Github/job-automation/backend/generated_resumes)",
-      "Bash(mkdir -p /c/Github/job-automation/frontend/src/components)"
+      "Bash(mkdir -p /c/Github/job-automation/frontend/src/components)",
+      "Bash(python -c \"import ast, sys; files=['db.py','scraper.py','scorer.py','resume_tailor.py','main.py','resume_converter.py']; [print\\(f+'  OK'\\) if ast.parse\\(open\\(f\\).read\\(\\)\\) else None for f in files]\")",
+      "Bash(python3 -c ':*)",
+      "Bash(py -c ':*)"
     ]
   }
 }

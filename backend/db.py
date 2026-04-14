@@ -1,56 +1,139 @@
 import os
-from supabase import create_client, Client
-from dotenv import load_dotenv
+import sqlite3
+import threading
+import json
 
-load_dotenv(os.path.join(os.path.dirname(__file__), "..", ".env"))
-
-_client: Client | None = None
-
-
-def get_client() -> Client:
-    global _client
-    if _client is None:
-        _client = create_client(os.environ["SUPABASE_URL"], os.environ["SUPABASE_ANON_KEY"])
-    return _client
+DB_PATH = os.path.join(os.path.dirname(__file__), "jobs.db")
+_lock = threading.Lock()
 
 
-# ── jobs ──────────────────────────────────────────────────────────────────────
+def get_conn() -> sqlite3.Connection:
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.row_factory = sqlite3.Row
+    return conn
+
+
+def init_db() -> None:
+    with _lock:
+        conn = get_conn()
+        conn.executescript("""
+            CREATE TABLE IF NOT EXISTS jobs (
+                id TEXT PRIMARY KEY,
+                platform TEXT,
+                title TEXT,
+                company TEXT,
+                location TEXT,
+                work_arrangement TEXT,
+                job_type TEXT,
+                duration TEXT,
+                stipend TEXT,
+                jd_text TEXT,
+                url TEXT UNIQUE,
+                posted_date TEXT,
+                scraped_at TEXT DEFAULT (datetime('now')),
+                scored INTEGER DEFAULT 0,
+                scoring_failed INTEGER DEFAULT 0,
+                status TEXT DEFAULT 'new'
+            );
+
+            CREATE TABLE IF NOT EXISTS job_scores (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT REFERENCES jobs(id),
+                fit_score INTEGER,
+                matched_skills TEXT,
+                gaps TEXT,
+                recommendation TEXT,
+                reasoning TEXT,
+                scored_at TEXT DEFAULT (datetime('now'))
+            );
+
+            CREATE TABLE IF NOT EXISTS resume_outputs (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                job_id TEXT REFERENCES jobs(id) UNIQUE,
+                match_score INTEGER,
+                missing_keywords TEXT,
+                ats_flags TEXT,
+                html_path TEXT,
+                pdf_path TEXT,
+                generation_failed INTEGER DEFAULT 0,
+                generated_at TEXT DEFAULT (datetime('now'))
+            );
+        """)
+        conn.commit()
+        conn.close()
+
 
 def insert_jobs_deduplicated(jobs: list[dict]) -> int:
-    """Insert jobs, skipping any whose URL already exists. Returns count inserted."""
-    db = get_client()
     inserted = 0
-    for job in jobs:
-        if not job.get("url"):
-            continue
+    with _lock:
+        conn = get_conn()
         try:
-            db.table("jobs").insert(job).execute()
-            inserted += 1
-        except Exception as e:
-            if "duplicate" in str(e).lower() or "unique" in str(e).lower():
-                continue  # already exists — skip silently
-            print(f"Insert failed: {e} — {job.get('url')}")
+            for job in jobs:
+                if not job.get("url"):
+                    continue
+                try:
+                    conn.execute(
+                        """INSERT INTO jobs
+                           (id, platform, title, company, location, work_arrangement,
+                            job_type, duration, stipend, jd_text, url, posted_date)
+                           VALUES
+                           (:id, :platform, :title, :company, :location, :work_arrangement,
+                            :job_type, :duration, :stipend, :jd_text, :url, :posted_date)""",
+                        job,
+                    )
+                    inserted += 1
+                except sqlite3.IntegrityError:
+                    continue  # duplicate URL — skip silently
+            conn.commit()
+        finally:
+            conn.close()
     return inserted
 
 
 def get_unscored_jobs() -> list[dict]:
-    db = get_client()
-    return (
-        db.table("jobs")
-        .select("*")
-        .eq("scored", False)
-        .eq("scoring_failed", False)
-        .execute()
-        .data
-    )
+    conn = get_conn()
+    try:
+        rows = conn.execute(
+            "SELECT * FROM jobs WHERE scored=0 AND scoring_failed=0"
+        ).fetchall()
+        return [dict(r) for r in rows]
+    finally:
+        conn.close()
 
 
 def mark_job_scored(job_id: str) -> None:
-    get_client().table("jobs").update({"scored": True}).eq("id", job_id).execute()
+    with _lock:
+        conn = get_conn()
+        try:
+            conn.execute("UPDATE jobs SET scored=1 WHERE id=?", (job_id,))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def mark_job_scoring_failed(job_id: str) -> None:
-    get_client().table("jobs").update({"scoring_failed": True}).eq("id", job_id).execute()
+    with _lock:
+        conn = get_conn()
+        try:
+            conn.execute("UPDATE jobs SET scoring_failed=1 WHERE id=?", (job_id,))
+            conn.commit()
+        finally:
+            conn.close()
+
+
+def _attach_score(conn: sqlite3.Connection, job: dict) -> dict:
+    row = conn.execute(
+        "SELECT * FROM job_scores WHERE job_id=? ORDER BY scored_at DESC LIMIT 1",
+        (job["id"],),
+    ).fetchone()
+    if row:
+        score = dict(row)
+        score["matched_skills"] = json.loads(score.get("matched_skills") or "[]")
+        score["gaps"] = json.loads(score.get("gaps") or "[]")
+        job["score"] = score
+    else:
+        job["score"] = None
+    return job
 
 
 def get_jobs(
@@ -59,74 +142,127 @@ def get_jobs(
     arrangement: str | None = None,
     job_type: str | None = None,
     search: str | None = None,
+    recommendation: str | None = None,
 ) -> list[dict]:
-    db = get_client()
-    query = db.table("jobs").select("*, job_scores(*), applications(*)")
+    conn = get_conn()
+    try:
+        rows = conn.execute("SELECT * FROM jobs ORDER BY scraped_at DESC").fetchall()
+        jobs = [_attach_score(conn, dict(r)) for r in rows]
 
-    if platform:
-        query = query.eq("platform", platform)
-    if arrangement:
-        query = query.eq("work_arrangement", arrangement)
-    if job_type:
-        query = query.eq("job_type", job_type)
+        if platform:
+            jobs = [j for j in jobs if j.get("platform") == platform]
+        if arrangement:
+            jobs = [j for j in jobs if j.get("work_arrangement") == arrangement]
+        if job_type:
+            jobs = [j for j in jobs if j.get("job_type") == job_type]
+        if search:
+            s = search.lower()
+            jobs = [j for j in jobs if
+                    s in (j.get("title") or "").lower()
+                    or s in (j.get("company") or "").lower()
+                    or s in (j.get("jd_text") or "").lower()]
+        if min_score is not None:
+            jobs = [j for j in jobs if j.get("score") and j["score"].get("fit_score", 0) >= min_score]
+        if recommendation:
+            jobs = [j for j in jobs if j.get("score") and j["score"].get("recommendation") == recommendation]
 
-    jobs = query.execute().data
-
-    # Client-side filters (search + min_score)
-    if search:
-        s = search.lower()
-        jobs = [
-            j for j in jobs
-            if s in (j.get("title") or "").lower()
-            or s in (j.get("company") or "").lower()
-            or s in (j.get("jd_text") or "").lower()
-        ]
-
-    if min_score is not None:
-        jobs = [
-            j for j in jobs
-            if j.get("job_scores") and j["job_scores"][0].get("fit_score", 0) >= min_score
-        ]
-
-    return jobs
+        return jobs
+    finally:
+        conn.close()
 
 
 def get_job_by_id(job_id: str) -> dict | None:
-    res = get_client().table("jobs").select("*, job_scores(*), applications(*)").eq("id", job_id).execute()
-    return res.data[0] if res.data else None
+    conn = get_conn()
+    try:
+        row = conn.execute("SELECT * FROM jobs WHERE id=?", (job_id,)).fetchone()
+        if not row:
+            return None
+        return _attach_score(conn, dict(row))
+    finally:
+        conn.close()
+
+
+def update_job_status(job_id: str, status: str) -> None:
+    with _lock:
+        conn = get_conn()
+        try:
+            conn.execute("UPDATE jobs SET status=? WHERE id=?", (status, job_id))
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def clear_all_jobs() -> None:
-    db = get_client()
-    db.table("resume_outputs").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
-    db.table("job_scores").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
-    db.table("applications").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
-    db.table("jobs").delete().neq("id", "00000000-0000-0000-0000-000000000000").execute()
+    with _lock:
+        conn = get_conn()
+        try:
+            conn.executescript("""
+                DELETE FROM resume_outputs;
+                DELETE FROM job_scores;
+                DELETE FROM jobs;
+            """)
+            conn.commit()
+        finally:
+            conn.close()
 
-
-# ── job_scores ─────────────────────────────────────────────────────────────────
 
 def insert_score(score: dict) -> None:
-    get_client().table("job_scores").insert(score).execute()
+    with _lock:
+        conn = get_conn()
+        try:
+            conn.execute(
+                """INSERT INTO job_scores
+                   (job_id, fit_score, matched_skills, gaps, recommendation, reasoning)
+                   VALUES (:job_id, :fit_score, :matched_skills, :gaps, :recommendation, :reasoning)""",
+                {
+                    **score,
+                    "matched_skills": json.dumps(score.get("matched_skills", [])),
+                    "gaps": json.dumps(score.get("gaps", [])),
+                },
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
-# ── applications ───────────────────────────────────────────────────────────────
-
-def upsert_application(job_id: str, status: str, notes: str | None = None) -> dict:
-    payload: dict = {"job_id": job_id, "status": status}
-    if notes is not None:
-        payload["notes"] = notes
-    res = get_client().table("applications").upsert(payload, on_conflict="job_id").execute()
-    return res.data[0]
-
-
-# ── resume_outputs ─────────────────────────────────────────────────────────────
-
-def upsert_resume_output(record: dict) -> dict:
-    res = get_client().table("resume_outputs").upsert(record, on_conflict="job_id").execute()
-    return res.data[0]
+def upsert_resume_output(record: dict) -> None:
+    with _lock:
+        conn = get_conn()
+        try:
+            conn.execute(
+                """INSERT INTO resume_outputs
+                   (job_id, match_score, missing_keywords, ats_flags, html_path, pdf_path, generation_failed)
+                   VALUES (:job_id, :match_score, :missing_keywords, :ats_flags, :html_path, :pdf_path, :generation_failed)
+                   ON CONFLICT(job_id) DO UPDATE SET
+                     match_score=excluded.match_score,
+                     missing_keywords=excluded.missing_keywords,
+                     ats_flags=excluded.ats_flags,
+                     html_path=excluded.html_path,
+                     pdf_path=excluded.pdf_path,
+                     generation_failed=excluded.generation_failed,
+                     generated_at=datetime('now')""",
+                {
+                    **record,
+                    "missing_keywords": json.dumps(record.get("missing_keywords", [])),
+                    "ats_flags": json.dumps(record.get("ats_flags", [])),
+                },
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
 
 def get_resume_output(job_id: str) -> dict | None:
-    res = get_client().table("resume_outputs").select("*").eq("job_id", job_id).execute()
-    return res.data[0] if res.data else None
+    conn = get_conn()
+    try:
+        row = conn.execute(
+            "SELECT * FROM resume_outputs WHERE job_id=?", (job_id,)
+        ).fetchone()
+        if not row:
+            return None
+        result = dict(row)
+        result["missing_keywords"] = json.loads(result.get("missing_keywords") or "[]")
+        result["ats_flags"] = json.loads(result.get("ats_flags") or "[]")
+        return result
+    finally:
+        conn.close()
