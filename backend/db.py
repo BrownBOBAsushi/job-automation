@@ -53,6 +53,7 @@ def init_db() -> None:
                 match_score INTEGER,
                 missing_keywords TEXT,
                 ats_flags TEXT,
+                eval_warnings TEXT DEFAULT '[]',
                 html_path TEXT,
                 pdf_path TEXT,
                 generation_failed INTEGER DEFAULT 0,
@@ -60,6 +61,12 @@ def init_db() -> None:
             );
         """)
         conn.commit()
+        # Migrate existing DB: add eval_warnings column if missing
+        try:
+            conn.execute("ALTER TABLE resume_outputs ADD COLUMN eval_warnings TEXT DEFAULT '[]'")
+            conn.commit()
+        except sqlite3.OperationalError:
+            pass  # column already exists
         conn.close()
 
 
@@ -231,12 +238,13 @@ def upsert_resume_output(record: dict) -> None:
         try:
             conn.execute(
                 """INSERT INTO resume_outputs
-                   (job_id, match_score, missing_keywords, ats_flags, html_path, pdf_path, generation_failed)
-                   VALUES (:job_id, :match_score, :missing_keywords, :ats_flags, :html_path, :pdf_path, :generation_failed)
+                   (job_id, match_score, missing_keywords, ats_flags, eval_warnings, html_path, pdf_path, generation_failed)
+                   VALUES (:job_id, :match_score, :missing_keywords, :ats_flags, :eval_warnings, :html_path, :pdf_path, :generation_failed)
                    ON CONFLICT(job_id) DO UPDATE SET
                      match_score=excluded.match_score,
                      missing_keywords=excluded.missing_keywords,
                      ats_flags=excluded.ats_flags,
+                     eval_warnings=excluded.eval_warnings,
                      html_path=excluded.html_path,
                      pdf_path=excluded.pdf_path,
                      generation_failed=excluded.generation_failed,
@@ -245,6 +253,7 @@ def upsert_resume_output(record: dict) -> None:
                     **record,
                     "missing_keywords": json.dumps(record.get("missing_keywords", [])),
                     "ats_flags": json.dumps(record.get("ats_flags", [])),
+                    "eval_warnings": json.dumps(record.get("eval_warnings", [])),
                 },
             )
             conn.commit()
@@ -263,6 +272,7 @@ def get_resume_output(job_id: str) -> dict | None:
         result = dict(row)
         result["missing_keywords"] = json.loads(result.get("missing_keywords") or "[]")
         result["ats_flags"] = json.loads(result.get("ats_flags") or "[]")
+        result["eval_warnings"] = json.loads(result.get("eval_warnings") or "[]")
         return result
     finally:
         conn.close()

@@ -97,6 +97,16 @@ export default function ResumeGenerator({ jobId }) {
             ))}
           </div>
         )}
+        {output?.eval_warnings?.length > 0 && (
+          <div className="mt-2 space-y-1">
+            {output.eval_warnings.map((warning, i) => (
+              <div key={i} className="flex items-start gap-1.5 text-xs text-amber-400">
+                <span>⚠</span>
+                <span>{warning}</span>
+              </div>
+            ))}
+          </div>
+        )}
       </div>
     )
   }

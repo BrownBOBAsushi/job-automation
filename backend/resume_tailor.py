@@ -1,6 +1,7 @@
 import html as html_lib
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -166,6 +167,129 @@ MASTER_PROJECTS = [
 
 _PROJECT_MAP = {p["id"]: p for p in MASTER_PROJECTS}
 
+# ── Project category filtering (Fix 1) ─────────────────────────────────────────
+
+FINANCE_ONLY_IDS = {"cfa", "stockanalysis", "hdb"}
+BLOCKCHAIN_ONLY_IDS = {"singhacks", "ripplemart"}
+DEFAULT_TECH_IDS = ["blitzjobz", "ragbot", "ezbiz"]  # safe fallback for any tech JD
+
+
+def _is_finance_jd(jd_text: str) -> bool:
+    finance_terms = [
+        "portfolio", "equity", "trading", "quant", "investment",
+        "financial analyst", "asset management", "hedge fund", "fixed income",
+        "derivatives", "bloomberg", "valuation"
+    ]
+    jd_lower = jd_text.lower()
+    return sum(1 for t in finance_terms if t in jd_lower) >= 2
+
+
+def _is_blockchain_jd(jd_text: str) -> bool:
+    web3_terms = [
+        "blockchain", "web3", "smart contract", "defi", "token",
+        "crypto", "solidity", "ethereum", "nft", "dao", "on-chain"
+    ]
+    jd_lower = jd_text.lower()
+    return sum(1 for t in web3_terms if t in jd_lower) >= 2
+
+
+def _filter_and_fill_project_ids(selected_ids: list, jd_text: str) -> list:
+    filtered = list(selected_ids)
+
+    if not _is_finance_jd(jd_text):
+        filtered = [pid for pid in filtered if pid not in FINANCE_ONLY_IDS]
+
+    if not _is_blockchain_jd(jd_text):
+        filtered = [pid for pid in filtered if pid not in BLOCKCHAIN_ONLY_IDS]
+
+    for pid in DEFAULT_TECH_IDS:
+        if len(filtered) >= 3:
+            break
+        if pid not in filtered:
+            filtered.append(pid)
+
+    return filtered[:3]
+
+
+# ── Skills pool validation (Fix 3) ─────────────────────────────────────────────
+
+SKILLS_POOL = {
+    "Technical": [
+        "Python", "TypeScript", "JavaScript", "TypeScript/JavaScript",
+        "Java", "SQL", "R", "Streamlit", "React.js", "Node.js", "FastAPI"
+    ],
+    "AI / LLM": [
+        "Gemini API", "RAG pipelines", "Qdrant", "MongoDB",
+        "agentic orchestration", "multimodal analysis", "prompt engineering",
+        "context engineering", "vector databases", "LangChain",
+        "open-source models", "Llama", "Mistral"
+    ],
+    "Tools": [
+        "Git", "Docker", "Supabase", "Excel VBA", "Figma",
+        "VS Code", "REST APIs", "MongoDB", "Qdrant"
+    ],
+    "Languages": [
+        "English (Native)", "Chinese (Native)",
+        "Malay (Professional)", "Japanese (N4)"
+    ],
+}
+
+
+def _validate_skills(selected_skills: dict) -> dict:
+    validated = {}
+    for category, value in selected_skills.items():
+        if category == "Languages":
+            validated[category] = "English (Native), Chinese (Native), Malay (Professional), Japanese (N4)"
+            continue
+
+        pool = SKILLS_POOL.get(category, [])
+        if not pool:
+            print(f"Skills validation: unknown category '{category}' — skipping")
+            continue
+
+        raw_items = [s.strip() for s in value.split(",") if s.strip()]
+        pool_lower = [p.lower() for p in pool]
+
+        valid_items = []
+        for item in raw_items:
+            if any(item.lower() in p or p in item.lower() for p in pool_lower):
+                valid_items.append(item)
+            else:
+                print(f"Skills validation: removed hallucinated skill '{item}' from '{category}'")
+
+        if valid_items:
+            validated[category] = ", ".join(valid_items)
+
+    if "Languages" not in validated:
+        validated["Languages"] = "English (Native), Chinese (Native), Malay (Professional), Japanese (N4)"
+
+    return validated
+
+
+# ── JD signal extraction (Fix 2) ───────────────────────────────────────────────
+
+def _extract_jd_signal(jd_text: str, max_chars: int = 3000) -> str:
+    section_patterns = [
+        r'(?i)(what\s+we.re\s+looking\s+for)',
+        r'(?i)(requirements?)',
+        r'(?i)(qualifications?)',
+        r'(?i)(what\s+you\s+(will\s+)?(need|bring|have))',
+        r'(?i)(must\s+have)',
+        r'(?i)(responsibilit)',
+        r'(?i)(what\s+you.ll\s+do)',
+        r'(?i)(your\s+role)',
+        r'(?i)(the\s+role)',
+        r'(?i)(job\s+description)',
+    ]
+    for pattern in section_patterns:
+        match = re.search(pattern, jd_text)
+        if match and match.start() > 100:
+            extracted = jd_text[match.start():]
+            return extracted[:max_chars]
+
+    return jd_text[:max_chars]
+
+
 # ── Prompts ─────────────────────────────────────────────────────────────────────
 
 CALL1_PROMPT = """You are a ruthlessly selective tech recruiter and resume strategist.
@@ -193,7 +317,7 @@ AVAILABLE PROJECTS (choose by id):
 - hdb: HDB resale market analysis, R + statistics, Jan 2026
 
 Rules:
-- Select AT LEAST 3 projects most relevant to this JD
+- Select EXACTLY 3 projects most relevant to this JD, ranked by relevance (most relevant first)
 - Do NOT select finance/quant projects (cfa, stockanalysis, hdb) unless JD explicitly requires finance
 - Do NOT select blockchain projects (singhacks, ripplemart) unless JD explicitly requires blockchain/Web3
 - For tech/AI/startup roles: prefer blitzjobz, ragbot, ezbiz, singhacks
@@ -275,6 +399,40 @@ def _parse_json_safe(raw: str, required_keys: list) -> dict | None:
     except Exception as e:
         print(f"JSON parse failed: {e}\nRaw (first 300): {raw[:300]}")
         return None
+
+
+# ── Post-generation evaluation checks (Fix 4) ──────────────────────────────────
+
+def _evaluate_resume(html_content: str, call1: dict, call2: dict) -> list[str]:
+    warnings = []
+
+    asm_bullets = call2.get("asm_bullets", [])
+    if asm_bullets and "40%" not in asm_bullets[0]:
+        warnings.append("40% metric missing from ASM bullet — original restored automatically")
+
+    selected_ids = call1.get("selected_project_ids", [])
+    for pid in selected_ids:
+        project = _PROJECT_MAP.get(pid)
+        if project:
+            title_fragment = project["title"][:20]
+            if title_fragment not in html_content:
+                warnings.append(f"Project '{pid}' ({title_fragment}...) may not have rendered")
+
+    missing_kws = call1.get("missing_keywords", [])
+    if missing_kws:
+        embedded = sum(1 for kw in missing_kws if kw.lower() in html_content.lower())
+        if embedded == 0:
+            warnings.append(
+                f"None of the {len(missing_kws)} missing keywords were embedded "
+                f"({', '.join(missing_kws[:3])}{'...' if len(missing_kws) > 3 else ''})"
+            )
+
+    if "singhacks" in selected_ids:
+        singhacks_bullets = call2.get("project_bullets", {}).get("singhacks", [])
+        if singhacks_bullets and "Top 3" not in " ".join(singhacks_bullets):
+            warnings.append("SingHacks 'Top 3' metric missing from rewritten bullets")
+
+    return warnings
 
 
 # ── HTML template (LLM never touches this) ──────────────────────────────────────
@@ -572,7 +730,7 @@ def generate_resume(job_id: str, jd_text: str, job_title: str, company: str) -> 
     # ── Call 1: gap analysis + project selection (gemma4:e4b, fast) ────────────
     call1_raw = _ollama_chat(
         model="gemma4:e4b",
-        prompt=CALL1_PROMPT.format(jd_text=jd_text[:3000]),
+        prompt=CALL1_PROMPT.format(jd_text=_extract_jd_signal(jd_text, max_chars=2500)),
         expect_json=True,
     )
     call1 = _parse_json_safe(call1_raw, required_keys=[
@@ -581,13 +739,18 @@ def generate_resume(job_id: str, jd_text: str, job_title: str, company: str) -> 
     if not call1:
         raise RuntimeError("Call 1 failed — could not parse gap analysis JSON")
 
-    # Validate and cap selected project IDs
+    # Validate against known pool
     valid_ids = set(_PROJECT_MAP.keys())
-    call1["selected_project_ids"] = [
-        pid for pid in call1["selected_project_ids"] if pid in valid_ids
-    ][:3]
+    raw_ids = [pid for pid in call1["selected_project_ids"] if pid in valid_ids]
+
+    # Apply category filtering + backfill
+    call1["selected_project_ids"] = _filter_and_fill_project_ids(raw_ids, jd_text)
+
     if not call1["selected_project_ids"]:
-        raise RuntimeError("Call 1 returned no valid project IDs")
+        raise RuntimeError("Call 1 returned no valid project IDs after filtering")
+
+    # Validate skills against known pool — remove hallucinated entries
+    call1["selected_skills"] = _validate_skills(call1.get("selected_skills", {}))
 
     # Build bullet context for Call 2
     selected_bullets_text = ""
@@ -602,7 +765,7 @@ def generate_resume(job_id: str, jd_text: str, job_title: str, company: str) -> 
     call2_raw = _ollama_chat(
         model="qwen2.5:14b",
         prompt=CALL2_PROMPT.format(
-            jd_text=jd_text[:2000],
+            jd_text=_extract_jd_signal(jd_text, max_chars=1500),
             missing_keywords=", ".join(call1.get("missing_keywords", [])),
             selected_project_bullets=selected_bullets_text,
         ),
@@ -622,6 +785,13 @@ def generate_resume(job_id: str, jd_text: str, job_title: str, company: str) -> 
     # ── Build HTML (pure Python — no LLM) ──────────────────────────────────────
     html_content = _build_html(call1, call2)
 
+    # ── Run evaluation checks ───────────────────────────────────────────────────
+    eval_warnings = _evaluate_resume(html_content, call1, call2)
+    if eval_warnings:
+        print(f"Resume eval warnings for {job_id}:")
+        for w in eval_warnings:
+            print(f"  ⚠ {w}")
+
     # ── Compile PDF (sync Playwright) ───────────────────────────────────────────
     pdf_path = _compile_pdf(html_content, job_id)
     html_path = os.path.join(
@@ -633,6 +803,7 @@ def generate_resume(job_id: str, jd_text: str, job_title: str, company: str) -> 
         "match_score": call1.get("match_score", 0),
         "missing_keywords": call1.get("missing_keywords", []),
         "ats_flags": call1.get("ats_flags", []),
+        "eval_warnings": eval_warnings,
         "html_path": html_path,
         "pdf_path": pdf_path,
         "generation_failed": 0,

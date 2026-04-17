@@ -1,17 +1,20 @@
 # Internship Intelligence System
 
-A personal job intelligence system for internship hunting in Singapore. Scrapes listings from MyCareersFuture and Indeed, scores every role against your master resume using Claude AI, and surfaces a ranked shortlist via a polished dark-mode dashboard. For roles you're keen on, one click triggers an automated resume tailoring pipeline — generating an ATS-optimised, LaTeX-compiled PDF.
+A personal job intelligence system for internship hunting in Singapore. Scrapes listings from MyCareersFuture and Indeed, scores every role against your master resume using local LLMs via Ollama, and surfaces a ranked shortlist via a dark-mode dashboard. For roles you're keen on, one click triggers a 2-step resume tailoring pipeline — generating a Playwright-compiled PDF using Jake's Resume HTML template.
 
 ---
 
 ## Features
 
 - **Job aggregation** — MyCareersFuture public API (primary) + Indeed via JobSpy (fallback)
-- **AI fit scoring** — Claude evaluates every JD against your resume: fit score 1–10, matched skills, gaps, and a recommendation (Apply / Maybe / Skip)
-- **On-demand resume tailoring** — 3-step Claude pipeline rewrites bullets for the specific role and compiles a PDF via pdflatex (Jake's Resume template)
-- **Kanban tracker** — drag-and-drop pipeline: Saved → Applied → Interviewing → Offer
-- **Internship-specific filters** — stipend range, duration, work arrangement, job type, platform
-- **Resume upload** — drag-and-drop `.docx` → auto-converts to markdown, used by every pipeline run
+- **AI fit scoring** — local LLM (`gemma4:e4b`) evaluates every JD against your resume: fit score 1–10, matched skills, gaps, recommendation (Apply / Maybe / Skip)
+- **JD signal extraction** — requirements/responsibilities section is extracted before truncation so the model sees actual signal, not company blurb
+- **On-demand resume tailoring** — 2-step local LLM pipeline: gap analysis + project selection (gemma4:e4b), then XYZ bullet rewrite (qwen2.5:14b), compiled to PDF via Playwright
+- **Project category filtering** — Python-side guardrails prevent finance/blockchain projects appearing on tech JDs regardless of model output
+- **Skills pool validation** — hallucinated skills are stripped against a known pool before appearing on the resume
+- **Post-generation eval warnings** — deterministic checks after each generation (metric preservation, keyword embedding, project rendering) surfaced in the UI
+- **Keyword customisation** — configure search terms per pipeline run via Settings
+- **Status tracking** — per-job kanban status (New → Saved → Applied → Interviewing → Offer)
 
 ---
 
@@ -21,22 +24,29 @@ A personal job intelligence system for internship hunting in Singapore. Scrapes 
 |---|---|
 | Job sources | MyCareersFuture REST API, Indeed (JobSpy) |
 | Backend | Python + FastAPI |
-| LLM | Claude API (`claude-sonnet-4-20250514`) |
-| PDF compiler | MiKTeX / pdflatex (Windows) |
-| Database | Supabase (PostgreSQL) |
+| LLM runtime | Ollama (local) |
+| Scoring model | `gemma4:e4b` |
+| Rewrite model | `qwen2.5:14b` |
+| PDF compiler | Playwright (Chromium headless) |
+| Database | SQLite (`jobs.db` — no external setup) |
 | Frontend | React + Vite + TailwindCSS |
 
 ---
 
 ## Prerequisites
 
-### 1. MiKTeX (Windows — required for PDF generation)
+### 1. Ollama (required for scoring + resume generation)
 
-1. Download from [miktex.org/download](https://miktex.org/download)
-2. Run installer → "Install for all users" → set missing packages to **Yes (auto-install)**
-3. Open a **new** Command Prompt and verify:
+1. Download from [ollama.com](https://ollama.com)
+2. Install and start the Ollama service
+3. Pull both models:
    ```
-   pdflatex --version
+   ollama pull gemma4:e4b
+   ollama pull qwen2.5:14b
+   ```
+4. Verify Ollama is running:
+   ```
+   curl http://localhost:11434/api/tags
    ```
 
 ### 2. Python 3.11+
@@ -55,82 +65,26 @@ node --version
 
 ## Setup
 
-### 1. Clone and configure environment variables
+### 1. Clone the repo
 
-Create a `.env` file in the project root:
-
-```
-ANTHROPIC_API_KEY=your_anthropic_key
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_ANON_KEY=your_supabase_anon_key
+```bash
+git clone https://github.com/BrownBOBAsushi/job-automation
+cd job-automation
 ```
 
-No other keys required. MyCareersFuture needs no auth. JobSpy needs no API key.
+No `.env` file required — no external API keys or cloud services.
 
-### 2. Set up Supabase
-
-Run the following SQL in your Supabase SQL editor:
-
-```sql
--- Table 1: jobs
-create table jobs (
-  id uuid default gen_random_uuid() primary key,
-  platform text,
-  title text,
-  company text,
-  location text,
-  work_arrangement text,
-  job_type text,
-  duration text,
-  stipend text,
-  jd_text text,
-  url text unique,
-  scraped_at timestamp default now(),
-  scored boolean default false,
-  scoring_failed boolean default false
-);
-
--- Table 2: job_scores
-create table job_scores (
-  id uuid default gen_random_uuid() primary key,
-  job_id uuid references jobs(id) on delete cascade,
-  fit_score integer,
-  matched_skills text[],
-  gaps text[],
-  recommendation text,
-  reasoning text,
-  scored_at timestamp default now()
-);
-
--- Table 3: applications
-create table applications (
-  id uuid default gen_random_uuid() primary key,
-  job_id uuid references jobs(id) on delete cascade,
-  status text default 'saved',
-  notes text,
-  applied_at timestamp,
-  updated_at timestamp default now()
-);
-
--- Table 4: resume_outputs
-create table resume_outputs (
-  id uuid default gen_random_uuid() primary key,
-  job_id uuid references jobs(id) on delete cascade,
-  match_score integer,
-  missing_keywords text[],
-  ats_flags text[],
-  latex_path text,
-  pdf_path text,
-  generation_failed boolean default false,
-  generated_at timestamp default now()
-);
-```
-
-### 3. Install backend dependencies
+### 2. Install backend dependencies
 
 ```bash
 cd backend
 pip install -r requirements.txt
+```
+
+### 3. Install Playwright browser
+
+```bash
+playwright install chromium
 ```
 
 ### 4. Install frontend dependencies
@@ -153,6 +107,8 @@ uvicorn main:app --reload
 
 API runs at `http://localhost:8000`. Interactive docs at `http://localhost:8000/docs`.
 
+The SQLite database (`jobs.db`) is created automatically on first start. If the database schema is missing the `eval_warnings` column (older installs), it is added automatically via migration on startup.
+
 ### Start the frontend
 
 ```bash
@@ -173,33 +129,40 @@ Dashboard runs at `http://localhost:5173`.
 3. The system converts it to markdown and stores it as `master_resume.md`
 4. Every pipeline run will use this version automatically
 
+### Configure search keywords
+
+1. Go to **Settings** page
+2. Edit the keyword list used for scraping MyCareersFuture
+3. Keywords are persisted to `keywords.json`
+
 ### Run the job pipeline
 
 1. Go to **Jobs** page
 2. Click **Run Pipeline**
-3. The backend scrapes MyCareersFuture + Indeed, deduplicates, then scores every new job against your resume
+3. The backend scrapes MyCareersFuture + Indeed, deduplicates, then scores every new job against your resume using `gemma4:e4b`
 4. The dashboard re-renders with jobs ranked by fit score
 
 ### Filter and search
 
 - Keyword search (client-side, instant) across title, company, and JD text
-- Filter by: platform, fit score, recommendation, work arrangement, job type, duration, stipend range
+- Filter by: platform, fit score, recommendation, work arrangement, job type
 
 ### Generate a tailored resume
 
 1. Click a job card to expand it
 2. Click **Generate Resume**
-3. The system runs 3 sequential Claude calls:
-   - **Call 1** — gap analysis + ATS audit (match score, missing keywords, ATS flags)
-   - **Call 2** — experience selection + XYZ bullet rewrite
-   - **Call 3** — full LaTeX generation using Jake's Resume template
-4. pdflatex compiles the `.tex` file (runs twice for correct layout)
-5. Click **Download PDF** when the status shows done
+3. The system runs 2 sequential LLM calls:
+   - **Call 1** (`gemma4:e4b`) — JD signal extraction, gap analysis, project selection (filtered + backfilled in Python), skills validation
+   - **Call 2** (`qwen2.5:14b`) — XYZ bullet rewrite for selected projects and ASM internship
+4. Python builds the HTML resume from the Jake's Resume template (no LLM involved)
+5. Playwright compiles the HTML to PDF
+6. Post-generation eval checks run and any warnings are stored
+7. Click **Download PDF** — warnings (if any) display below the button in amber
 
 ### Track applications
 
-Go to **Applications** page to manage your pipeline with drag-and-drop Kanban:
-- Saved → Applied → Interviewing → Offer
+Use the status dropdown on each job card to move it through:
+New → Saved → Applied → Interviewing → Offer
 
 ---
 
@@ -214,14 +177,14 @@ Go to **Applications** page to manage your pipeline with drag-and-drop Kanban:
         ↓ (on failure or < 10 results)
 [Fallback: JobSpy scrapes Indeed]
         ↓
-[Deduplicate by URL → insert new jobs to Supabase]
+[Deduplicate by URL → insert new jobs to SQLite]
         ↓
-[For each unscored job → Claude API scoring call]
+[For each unscored job → _extract_jd_signal() → gemma4:e4b scoring call]
         ↓
-[Scores written to Supabase → dashboard re-renders]
+[Scores written to SQLite → dashboard re-renders]
 ```
 
-POST `/pipeline/run` returns **202 Accepted** immediately. The actual scrape + score runs as a background thread. Frontend polls `/pipeline/status`.
+POST `/pipeline/run` returns **202 Accepted** immediately. Scrape + score runs as a background thread. Frontend polls `/pipeline/status`.
 
 ### Pipeline B — Resume Tailoring
 
@@ -230,16 +193,58 @@ POST `/pipeline/run` returns **202 Accepted** immediately. The actual scrape + s
         ↓
 [POST /resume/generate/{job_id}]
         ↓
-[Call 1: gap analysis + ATS audit → match_score, missing_keywords, ats_flags]
+[_extract_jd_signal() — seek to Requirements/Responsibilities section]
         ↓
-[Call 2: experience selection + XYZ rewrite → selected_experiences, skills]
+[Call 1: gemma4:e4b — match_score, missing_keywords, ats_flags,
+         selected_project_ids, selected_skills]
         ↓
-[Call 3: full main.tex generation (Jake's Resume template)]
+[Python: _filter_and_fill_project_ids() — strip invalid categories, backfill to 3]
+[Python: _validate_skills() — remove hallucinated skills against SKILLS_POOL]
         ↓
-[pdflatex compiles main.tex → main.pdf (two passes)]
+[Call 2: qwen2.5:14b — rewrite ASM bullets + selected project bullets (XYZ formula)]
+        ↓
+[Python: _build_html() — assemble Jake's Resume HTML template]
+        ↓
+[_evaluate_resume() — check metric preservation, keyword embedding, project rendering]
+        ↓
+[pdf_worker.py: Playwright compiles HTML → PDF]
+        ↓
+[eval_warnings + paths saved to SQLite]
         ↓
 [GET /resume/download/{job_id} → streams PDF]
 ```
+
+---
+
+## Resume Generation Detail
+
+### Two-call LLM separation
+
+**Call 1 — Analysis only** (`gemma4:e4b`, fast 4B model):
+Returns structured JSON: match score, missing keywords, ATS flags, which 3 projects to use, which skills subset to show. No prose writing.
+
+**Call 2 — Writing only** (`qwen2.5:14b`, larger model):
+Receives only the 3 selected project bullets + missing keywords to embed. Rewrites using Google XYZ formula. Never sees the full project pool.
+
+### Python-side quality guardrails
+
+| Guardrail | What it prevents |
+|---|---|
+| `_extract_jd_signal()` | Model reading company blurb instead of requirements |
+| `_filter_and_fill_project_ids()` | Finance/blockchain projects on tech JDs |
+| `_validate_skills()` | Hallucinated skills (Kubernetes, Rust, etc.) on resume |
+| `_build_html()` 40% safety | ASM "40% reduction" metric stripped by model |
+| `_evaluate_resume()` | Silent failures only caught by manual PDF inspection |
+
+### Eval warnings
+
+Four deterministic checks run after HTML build (no LLM):
+1. ASM 40% metric present in bullet 1
+2. All selected project titles rendered in HTML
+3. At least one missing keyword embedded somewhere
+4. SingHacks "Top 3" metric preserved (if selected)
+
+Warnings are stored in `resume_outputs.eval_warnings` and shown below the Download PDF button in amber. They do not block download.
 
 ---
 
@@ -249,31 +254,36 @@ POST `/pipeline/run` returns **202 Accepted** immediately. The actual scrape + s
 |---|---|---|
 | POST | `/pipeline/run` | Trigger scrape + score (202, background task) |
 | GET | `/pipeline/status` | `idle / scraping / scoring / done / error` |
-| GET | `/jobs` | All scored jobs. Query params: `min_score`, `platform`, `arrangement`, `job_type`, `search` |
-| GET | `/jobs/{id}` | Single job detail |
-| PATCH | `/jobs/{id}/status` | Update kanban status (`saved / applied / interviewing / offer`) |
-| DELETE | `/jobs/clear` | Delete all jobs |
+| GET | `/jobs` | All jobs. Query: `min_score`, `platform`, `arrangement`, `job_type`, `search`, `recommendation` |
+| GET | `/jobs/{id}` | Single job with score attached |
+| PATCH | `/jobs/{id}/status` | Update status (`new / saved / applied / interviewing / offer`) |
+| DELETE | `/jobs/clear` | Delete all jobs and scores |
 | POST | `/resume/upload` | Upload `.docx` → converts to `master_resume.md` |
 | GET | `/resume` | Return current `master_resume.md` content |
-| POST | `/resume/generate/{job_id}` | Trigger 3-step tailoring pipeline |
-| GET | `/resume/status/{job_id}` | `pending / generating / done / failed` |
+| POST | `/resume/generate/{job_id}` | Trigger 2-step tailoring pipeline |
+| GET | `/resume/status/{job_id}` | `not_started / pending / generating / done / failed` |
 | GET | `/resume/download/{job_id}` | Stream PDF for download |
+| GET | `/settings/keywords` | Get current scrape keywords |
+| POST | `/settings/keywords` | Update scrape keywords |
 
 ---
 
 ## File Structure
 
 ```
-internship-tracker/
+job-automation/
 ├── backend/
 │   ├── main.py                  # FastAPI app + all endpoints
 │   ├── scraper.py               # MCF API + JobSpy Indeed fallback
-│   ├── scorer.py                # Claude API scoring with JSON parsing
-│   ├── resume_tailor.py         # 3-step Claude tailoring + pdflatex
+│   ├── scorer.py                # Ollama scoring + _extract_jd_signal()
+│   ├── resume_tailor.py         # 2-call Ollama pipeline + HTML builder + eval
 │   ├── resume_converter.py      # .docx → markdown (python-docx + markdownify)
-│   ├── db.py                    # Supabase client + CRUD helpers
+│   ├── pdf_worker.py            # Playwright subprocess: HTML → PDF
+│   ├── db.py                    # SQLite CRUD (jobs, job_scores, resume_outputs)
+│   ├── jobs.db                  # Auto-created SQLite database
 │   ├── master_resume.md         # Auto-generated from .docx upload
-│   ├── generated_resumes/       # {job_id}/main.tex + main.pdf
+│   ├── keywords.json            # Persisted scrape keywords
+│   ├── generated_resumes/       # {job_id}/resume.html + resume.pdf
 │   └── requirements.txt
 ├── frontend/
 │   ├── src/
@@ -281,21 +291,18 @@ internship-tracker/
 │   │   ├── components/
 │   │   │   ├── JobList.jsx
 │   │   │   ├── JobCard.jsx
+│   │   │   ├── JobDetail.jsx
 │   │   │   ├── FilterBar.jsx
 │   │   │   ├── SearchBar.jsx
-│   │   │   ├── KanbanBoard.jsx
 │   │   │   ├── PipelineButton.jsx
 │   │   │   ├── ResumeUploader.jsx
-│   │   │   ├── ResumeGenerator.jsx
-│   │   │   └── StatusBadge.jsx
+│   │   │   └── ResumeGenerator.jsx
 │   │   ├── pages/
 │   │   │   ├── Jobs.jsx
-│   │   │   ├── Applications.jsx
 │   │   │   └── Settings.jsx
 │   │   └── main.jsx
 │   ├── index.html
 │   └── package.json
-├── .env
 └── README.md
 ```
 
@@ -303,7 +310,7 @@ internship-tracker/
 
 ## Scoring Logic
 
-Claude is instructed to score **ruthlessly honestly** — not optimistically. The candidate is a Year 1 university student competing against more experienced candidates.
+`gemma4:e4b` is instructed to score ruthlessly honestly — not optimistically. The candidate is a Year 1 university student competing against more experienced candidates.
 
 | Score | Meaning |
 |---|---|
@@ -315,19 +322,10 @@ Claude is instructed to score **ruthlessly honestly** — not optimistically. Th
 
 ## Known Constraints
 
+- **Ollama must be running** before starting the backend — scoring and resume generation will fail silently otherwise (warning printed at startup)
+- **Model cold start is slow** — first Ollama call after a system restart takes 30–60s to load the model into VRAM; subsequent calls are fast
 - **Pipeline is manual trigger only** — no scheduled/cron runs
 - **JobSpy can break** if Indeed changes their HTML structure — acceptable for a personal tool
-- **MiKTeX first run is slow** — it auto-downloads missing LaTeX packages on first compile; subsequent runs are fast
-- **Claude scoring calls are sequential** — never parallelised; `time.sleep(1)` between calls to respect rate limits
-- **JDs under 100 characters are skipped** — marked `scoring_failed=true`
-
----
-
-## v2 Ideas
-
-- Cover letter generation per role
-- Interview prep questions per role
-- Scheduled pipeline runs
-- JobStreet integration
-- Browser extension to manually add jobs from any board
-- Email digest of top new roles
+- **LLM calls are sequential** — never parallelised; `time.sleep(1)` between Call 1 and Call 2 to avoid GPU contention
+- **JDs under 100 characters are skipped** — marked `scoring_failed=1`
+- **gemma4:e4b is a 4B model** — Python-side guardrails compensate for occasional category errors and hallucinated skills

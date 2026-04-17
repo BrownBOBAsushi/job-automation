@@ -1,4 +1,5 @@
 import json
+import re
 import requests
 import db
 
@@ -32,6 +33,28 @@ Scoring:
 Target: Tech / Product / AI roles in Singapore."""
 
 
+def _extract_jd_signal(jd_text: str, max_chars: int = 3000) -> str:
+    section_patterns = [
+        r'(?i)(what\s+we.re\s+looking\s+for)',
+        r'(?i)(requirements?)',
+        r'(?i)(qualifications?)',
+        r'(?i)(what\s+you\s+(will\s+)?(need|bring|have))',
+        r'(?i)(must\s+have)',
+        r'(?i)(responsibilit)',
+        r'(?i)(what\s+you.ll\s+do)',
+        r'(?i)(your\s+role)',
+        r'(?i)(the\s+role)',
+        r'(?i)(job\s+description)',
+    ]
+    for pattern in section_patterns:
+        match = re.search(pattern, jd_text)
+        if match and match.start() > 100:
+            extracted = jd_text[match.start():]
+            return extracted[:max_chars]
+
+    return jd_text[:max_chars]
+
+
 def ollama_chat(model: str, prompt: str, expect_json: bool = True) -> str:
     payload: dict = {
         "model": model,
@@ -55,8 +78,8 @@ def score_job(jd_text: str, master_resume: str) -> dict | None:
         return None  # JD too short to score reliably
 
     prompt = SCORING_PROMPT.format(
-        master_resume=master_resume[:2000],  # cap resume; JD is the scoring signal
-        jd_text=jd_text[:3000],
+        master_resume=master_resume[:3000],
+        jd_text=_extract_jd_signal(jd_text, max_chars=2500),
     )
 
     raw = ""
